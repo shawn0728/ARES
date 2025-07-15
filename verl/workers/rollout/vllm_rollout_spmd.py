@@ -70,6 +70,18 @@ def _process_multi_modal_data(
 
     return None
 
+def compute_entropy_from_logprobs(logprobs_per_token_list: List[List[Dict[int, Any]]]) -> List[float]:
+    entropy_list = []
+    for logprobs_per_token in logprobs_per_token_list:
+        token_entropies = []
+        for logprob_dict in logprobs_per_token:
+            log_probs = np.array([logprob.logprob for logprob in logprob_dict.values()], dtype=np.float32)
+            probs = np.exp(log_probs)
+            entropy = -np.sum(probs * log_probs)
+            token_entropies.append(entropy)
+        mean_entropy = np.mean(token_entropies) if token_entropies else 0.0
+        entropy_list.append(float(mean_entropy))
+    return entropy_list
 
 class vLLMRollout(BaseRollout):
     def __init__(
@@ -188,10 +200,21 @@ class vLLMRollout(BaseRollout):
             vllm_inputs = [{"prompt_token_ids": list(raw_prompt_ids)} for raw_prompt_ids in batch_raw_prompt_ids]
 
         # users can customize different sampling_params at different run
-        with self.update_sampling_params(**prompts.meta_info):
+        # with self.update_sampling_params(**prompts.meta_info):
+        with self.update_sampling_params(logprobs=10,**prompts.meta_info):
             completions: List[RequestOutput] = self.inference_engine.generate(
                 prompts=vllm_inputs, sampling_params=self.sampling_params, use_tqdm=self.use_tqdm
             )
+
+            logprobs_per_token_list = []
+            for completion in completions:
+                for output in completion.outputs:
+                    logprobs_per_token = output.logprobs  # list of dict
+                    logprobs_per_token_list.append(logprobs_per_token)
+
+            entropy_list = compute_entropy_from_logprobs(logprobs_per_token_list)
+            # import ipdb;ipdb.set_trace()
+
             response_ids = [output.token_ids for completion in completions for output in completion.outputs]
             response_ids = VF.pad_2d_list_to_length(
                 response_ids, self.pad_token_id, max_length=self.config.response_length
@@ -235,8 +258,9 @@ class vLLMRollout(BaseRollout):
             batch_size=batch_size,
         )
         if batch_multi_modal_data is not None:
-            non_tensor_batch = {"multi_modal_data": batch_multi_modal_data}
+            non_tensor_batch = {"multi_modal_data": batch_multi_modal_data,
+                                "entropies": entropy_list}
         else:
-            non_tensor_batch = {}
+            non_tensor_batch = {"entropies": entropy_list}
 
         return DataProto(batch=batch, non_tensor_batch=non_tensor_batch, meta_info=prompts.meta_info)

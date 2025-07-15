@@ -193,13 +193,14 @@ class RayPPOTrainer:
         self.ray_worker_group_cls = ray_worker_group_cls
         self.difficulty_dict_train = {}
         self.target_length_dict = {}
+        self.target_entropy_dict = {}
         self.skip_gid_set = set()
         self.bootstrap_train_dataloader = bootstrap_train_dataloder
         self.bootstrap_val_dataloader = bootstrap_val_dataloader
         self.base_dataset = base_dataset
         self.epoch_update_iter = 0
         self.epoch_id = 0
-
+        self.drop_allpass_entropy_threshold = -1
         # define KL control
         if config.algorithm.disable_kl:
             self.use_reference_policy = False
@@ -447,9 +448,10 @@ class RayPPOTrainer:
             accuracies = reward_metrics["accuracy"]
             lengths = test_batch.batch["response_mask"].sum(dim=-1).cpu().tolist()
             global_ids = test_batch.non_tensor_batch["global_id"]
+            entropies = test_batch.non_tensor_batch["entropies"]
 
-            for gid, acc, length in zip(global_ids, accuracies, lengths):
-                uid2rollouts[gid].append({'length': length, 'is_correct': acc > 0.5})
+            for gid, acc, entropy, length in zip(global_ids, accuracies,entropies, lengths):
+                uid2rollouts[gid].append({'length': length,'entropy':entropy, 'is_correct': acc > 0.5})
             # store generations
             input_ids = test_batch.batch["prompts"]
             input_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in input_ids]
@@ -469,9 +471,7 @@ class RayPPOTrainer:
         # 聚合 accuracy，判定 difficulty
         difficulty_dict_val = {}
         difficulty_rollouts = defaultdict(list)
-        # 计算 difficulty bucket
-        difficulty_dict_val = {}
-        difficulty_rollouts = defaultdict(list)
+
         for gid, rollouts in uid2rollouts.items():
             acc_rate = sum(r["is_correct"] for r in rollouts) / len(rollouts)
             if acc_rate >= 2 / 3:
@@ -486,13 +486,20 @@ class RayPPOTrainer:
         self.difficulty_dict_val = difficulty_dict_val
         # 使用 LASER-D 的 ECR 方式计算 target length
         val_difficulty_statistics = {}
+        target_entropy_dict = {}
 
         for diff in ["easy", "medium", "hard"]:
             rollouts = difficulty_rollouts[diff]
             val_difficulty_statistics[diff] = len(rollouts)
+
             if not rollouts:
                 self.target_length_dict[diff] = 64
                 continue
+            
+            # calculate expected_entropy
+            entropies = [r["entropy"] for r in rollouts]
+            expected_entropy = np.percentile(entropies, 75)  # 例如 p75
+            target_entropy_dict[diff] = expected_entropy
 
             min_len, max_len, interval = 96, self.config.data.max_response_length, 32
             C_d = {"easy": 6, "medium": 3, "hard": 1}[diff]
@@ -510,12 +517,10 @@ class RayPPOTrainer:
                     break
             if not found:
                 self.target_length_dict[diff] = max_len  # fallback
+        
 
-
-
-
-
-
+        self.target_entropy_dict = target_entropy_dict
+        self.drop_allpass_entropy_threshold = target_entropy_dict.get("easy", 0.27) - 0.05  # 0.5 is a magic number
         self._maybe_log_val_generations(sample_inputs, sample_outputs, sample_labels, sample_scores)
         self.val_reward_score = torch.cat(reward_tensor_lst, dim=0).sum(-1).mean().item()
         val_reward_metrics = {f"val/{key}_reward": value for key, value in reduce_metrics(reward_metrics_lst).items()}
@@ -525,6 +530,7 @@ class RayPPOTrainer:
                 "val/target_length": self.target_length_dict,
             }
         )
+        val_reward_metrics.update({"val/self.expected_entropy": self.target_entropy_dict})
         # import pdb; pdb.set_trace()  # Debugging breakpoint
         print("Finish validation.")
         return {"val/reward_score": self.val_reward_score, **val_reward_metrics}
@@ -663,25 +669,6 @@ class RayPPOTrainer:
 
         self.data_iterator = iter(self.bootstrap_train_dataloader)
 
-        # for batch_idx in range(len(self.bootstrap_train_dataloader)):
-        #     try:
-        #         batch = self._make_batch_data(metrics={})
-        #     except Exception as e:
-        #         print(f"[Bootstrap] Failed to get batch at step {batch_idx}: {e}")
-        #         break
-        #     if batch is None:
-        #         break
-        #     # Get token-level reward scores
-        #     reward_tensor, reward_metrics = ray.get(self.reward_fn.compute_reward.remote(batch))
-        #     # import pdb;pdb.set_trace()
-        #     accuracies = reward_metrics["accuracy"]
-        #     lengths = batch.batch["response_mask"].sum(dim=-1).cpu().tolist()
-        #     global_ids = batch.non_tensor_batch["global_id"]
-
-        #     for gid, acc, length in zip(global_ids, accuracies, lengths):
-        #         uid2acc[gid].append(acc)
-        #         uid2len[gid].append(length)
-
         # self.actor_rollout_ref_wg.release_rollout_engine()
         for batch_dict in tqdm(self.bootstrap_train_dataloader,desc="[Bootstrap] Processing batches"):
             try:
@@ -713,10 +700,9 @@ class RayPPOTrainer:
                 accuracies = reward_metrics["accuracy"]
                 lengths = test_batch.batch["response_mask"].sum(dim=-1).cpu().tolist()
                 global_ids = test_batch.non_tensor_batch["global_id"]
+                entropies = test_batch.non_tensor_batch["entropies"]
 
-                for gid, acc, length in zip(global_ids, accuracies, lengths):
-                    uid2acc[gid].append(acc)
-                    uid2len[gid].append(length)
+                self.update_difficulty_and_skip_gid_set(test_batch)
 
             except Exception as e:
                 print(f"[Bootstrap] Failed to process batch: {e}")
@@ -724,22 +710,6 @@ class RayPPOTrainer:
 
         self.actor_rollout_ref_wg.release_rollout_engine()
 
-        # 聚合 accuracy，判定 ifficulty
-        difficulty_dict_train = {}
-        length_stats = defaultdict(list)
-
-        for gid in uid2acc:
-            acc_rate = sum(uid2acc[gid]) / rollout_n
-            if acc_rate == 1.0:
-                self.skip_gid_set.add(gid)
-            if acc_rate >= 2 / 3:
-                diff = "easy"
-            elif acc_rate >= 1 / 3:
-                diff = "medium"
-            else:
-                diff = "hard"
-            difficulty_dict_train[gid] = diff
-            # length_stats[diff].extend(uid2len[gid])
         self.logger.log(
             data={
                 "epoch/id": self.epoch_id,
@@ -748,7 +718,7 @@ class RayPPOTrainer:
             },
             step=self.global_step
         )
-        # self.difficulty_dict_train = difficulty_dict_train
+
         # print(f"[Bootstrap] difficulty_dict entries: {len(self.difficulty_dict)}")
 
     def compute_batch_accuracy(self, batch: DataProto) -> List[float]:
@@ -766,7 +736,37 @@ class RayPPOTrainer:
             accuracies.append(1.0 if grade_answer(answer, gt) else 0.0)
 
         return accuracies
-        
+    
+    def update_difficulty_and_skip_gid_set(self, batch: DataProto) -> None:
+        """
+        Update the difficulty_dict_train and skip_gid_set based on the current batch.
+        This function is called after each training step.
+        """
+        global_ids = batch.non_tensor_batch["global_id"]
+        accuracies = batch.non_tensor_batch["accuracy"]
+        entropies = batch.non_tensor_batch["entropies"]
+
+        uid2acc = defaultdict(list)
+        uid2ety = defaultdict(list)
+
+        for gid, acc, entropy in zip(global_ids, accuracies, entropies):
+            uid2acc[gid].append(acc)
+            uid2ety[gid].append(entropy)
+
+        for gid in uid2acc:
+            acc_rate = np.mean(uid2acc[gid])
+            mean_entropy = np.mean(uid2ety[gid])
+            if acc_rate == 1.0 and mean_entropy < self.drop_allpass_entropy_threshold:
+                self.skip_gid_set.add(gid)
+            if acc_rate >= 2 / 3:
+                self.difficulty_dict_train[gid] = "easy"
+            elif acc_rate >= 1 / 3:
+                self.difficulty_dict_train[gid] = "medium"
+            else:
+                self.difficulty_dict_train[gid] = "hard"
+
+        print(f"[Train] Updated difficulty_dict, size={len(self.difficulty_dict_train)}")
+
     def fit(self):
         """
         The training loop of PPO.
@@ -780,6 +780,13 @@ class RayPPOTrainer:
         # load checkpoint before doing anything
         self._load_checkpoint()
         main_tqdm.update(self.global_step)
+
+
+        if self.val_reward_fn is not None and self.config.trainer.val_before_train:
+            val_metrics = self._validate()
+            self.logger.log(data=val_metrics, step=self.global_step)
+            if self.config.trainer.val_only:
+                return
 
         if self.config.data.bootstrap and self.global_step == 0:
             self.bootstrap()
@@ -799,11 +806,11 @@ class RayPPOTrainer:
             )
         # perform validation before training
         # currently, we only support validation using the reward_function.
-        if self.val_reward_fn is not None and self.config.trainer.val_before_train:
-            val_metrics = self._validate()
-            self.logger.log(data=val_metrics, step=self.global_step)
-            if self.config.trainer.val_only:
-                return
+        # if self.val_reward_fn is not None and self.config.trainer.val_before_train:
+        #     val_metrics = self._validate()
+        #     self.logger.log(data=val_metrics, step=self.global_step)
+        #     if self.config.trainer.val_only:
+        #         return
         
 
 
@@ -843,27 +850,12 @@ class RayPPOTrainer:
                 self._balance_batch(batch, metrics=metrics)
                 
                 batch.non_tensor_batch['accuracy'] = self.compute_batch_accuracy(batch)
-                # accumulate accuracy for each sample
-                accuracy = batch.non_tensor_batch["accuracy"]
                 global_ids = batch.non_tensor_batch["global_id"]
-                cur_accuracy_dict = {}
-                for gid, acc in zip(global_ids, accuracy):
-                    cur_accuracy_dict.setdefault(gid, []).append(acc)
-                
-                # if self.global_step % self.config.trainer.difficulty_update_freq == 0:
-                for gid, acc_list in cur_accuracy_dict.items():
-                    acc_rate = sum(acc_list) / len(acc_list)
-                    if acc_rate == 1.0:
-                        self.skip_gid_set.add(gid)
-                    if acc_rate >= 2 / 3:
-                        self.difficulty_dict_train[gid] = "easy"
-                    elif acc_rate >= 1 / 3:
-                        self.difficulty_dict_train[gid] = "medium"
-                    else:
-                        self.difficulty_dict_train[gid] = "hard"
+                self.update_difficulty_and_skip_gid_set(batch)
 
-                print(f"[Train] Updated difficulty_dict, size={len(self.difficulty_dict_train)}")
                 batch.non_tensor_batch["dynamic_token_length"] = [self.target_length_dict[self.difficulty_dict_train[gid]] for gid in global_ids]
+                batch.non_tensor_batch["difficulty"] = [self.difficulty_dict_train[gid] for gid in global_ids]
+                batch.non_tensor_batch["target_entropy"] = [self.target_entropy_dict[self.difficulty_dict_train[gid]] for gid in global_ids]
 
 
                 # compute global valid tokens

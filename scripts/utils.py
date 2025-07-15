@@ -1,6 +1,6 @@
 import os
 import json
-from dotenv import load_dotenv
+# from dotenv import load_dotenv
 import os
 from datasets import load_dataset
 
@@ -18,7 +18,7 @@ def download_hf_model(repo_id,local_dir):
     repo_id=repo_id,
     local_dir=local_dir,  
     local_dir_use_symlinks=False,
-    token="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"
+    token="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"
     )
 def reindex_wrong_tensor_index():
     from safetensors import safe_open
@@ -90,9 +90,9 @@ def main():
     # processor = AutoProcessor.from_pretrained(local_path)
     # tokenizer = processor.tokenizer
     # check_lm_head(model, tokenizer)
-    # download_hf_model(repo_id="MM-R1-HH/text-coldstart-adaptive-v01",local_dir="/cpfs/user/yym/models/text-coldstart-adaptive-v01-original")
+    download_hf_model(repo_id="csfufu/Revisual-R1-Coldstart",local_dir="/cpfs/user/yym/models/revisual-r1")
     # download_hf_datasets()
-    count_all_pass_number("/cpfs/user/yym/projects/EasyR1/checkpoints/easy_r1/EY01.5_qwen7b_csfufu_original_rwd_remove_easy_rank_8_bootstrap/global_step_60/skip_gid_set.json")
+    # count_all_pass_number("/cpfs/user/yym/projects/EasyR1/checkpoints/easy_r1/EY01.5_qwen7b_csfufu_original_rwd_remove_easy_rank_8_bootstrap/global_step_60/skip_gid_set.json")
 
 if __name__ == "__main__":
     main()

@@ -11,6 +11,7 @@ data:
   # rollout_batch_size: 512  # equivalent to verl's data.train_batch_size
   rollout_batch_size: 128
   mini_rollout_batch_size: null  # equivalent to verl's data.gen_batch_size
+  # val_batch_size: 1024
   val_batch_size: 1024
   format_prompt: ./examples/format_prompt/math.jinja
   override_chat_template: null
@@ -85,7 +86,7 @@ worker:
   reward:
     reward_type: batch
     # reward_function: ./examples/reward_function/math.py:compute_score
-    reward_function: ./examples/reward_function/custom_math_length_reward_v2_0708.py:compute_score
+    reward_function: ./examples/reward_function/custom_math_length_entropy_reward_v2_0714.py:compute_score
 
 trainer:
   # total_epochs: 15
