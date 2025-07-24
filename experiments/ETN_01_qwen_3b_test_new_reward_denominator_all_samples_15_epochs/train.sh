@@ -17,15 +17,15 @@ export WANDB_BASE_URL=https://api.wandb.ai
 PROJECT_NAME=Adaptive_thinking
 
 python3 -m verl.trainer.main \
-    config=/cpfs/user/yym/projects/EasyR1_duplicated/experiments/${EXPERIMENT_NAME}/config.yaml \
+    config=/cpfs/user/yym/projects/Adaptive-VL-worktrees/exp_crucial_token_entropy/experiments/${EXPERIMENT_NAME}/config.yaml \
     data.train_files=/cpfs/user/yym/hugging_face/datasets/hiyouga_geometry3k_train/geometry3k_with_paths.jsonl \
     data.val_files=/cpfs/user/yym/hugging_face/datasets/hiyouga_geometry3k_test/geometry3k_with_paths.jsonl \
     worker.actor.model.model_path=${MODEL_PATH} \
     worker.actor.fsdp.torch_dtype=bf16 \
     worker.actor.optim.strategy=adamw_bf16 \
     worker.rollout.tensor_parallel_size=1 \
-    trainer.experiment_name=${EXPERIMENT_NAME}\
-    trainer.load_checkpoint_path=/cpfs/user/yym/projects/EasyR1_duplicated/checkpoints/easy_r1/${EXPERIMENT_NAME} \
-    trainer.n_gpus_per_node=1
+    trainer.experiment_name=${EXPERIMENT_NAME} \
+    trainer.load_checkpoint_path=/cpfs/user/yym/projects/Adaptive-VL-worktrees/exp_crucial_token_entropy/checkpoints/easy_r1/${EXPERIMENT_NAME} \
+    trainer.n_gpus_per_node=8 \
     trainer.project_name=${PROJECT_NAME} \
 

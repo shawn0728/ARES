@@ -193,7 +193,7 @@ class RayPPOTrainer:
         self.ray_worker_group_cls = ray_worker_group_cls
         self.difficulty_dict_train = {}
         self.target_length_dict = {}
-        self.target_entropy_dict = {}
+        self.target_high_entropy_token_num_dict = {}
         self.skip_gid_set = set()
         self.bootstrap_train_dataloader = bootstrap_train_dataloder
         self.bootstrap_val_dataloader = bootstrap_val_dataloader
@@ -201,6 +201,7 @@ class RayPPOTrainer:
         self.epoch_update_iter = 0
         self.epoch_id = 0
         self.drop_allpass_entropy_threshold = -1
+        self.high_entropy_token_threshold = 1.5
         # define KL control
         if config.algorithm.disable_kl:
             self.use_reference_policy = False
@@ -421,6 +422,7 @@ class RayPPOTrainer:
         reward_metrics_lst = defaultdict(list)
         uid2rollouts = defaultdict(list)
         print("Start validation...")
+        all_token_entropy_list = []
         self.actor_rollout_ref_wg.prepare_rollout_engine()
         for batch_dict in self.val_dataloader:
             test_batch = DataProto.from_single_dict(batch_dict)
@@ -433,9 +435,11 @@ class RayPPOTrainer:
             test_gen_batch.meta_info["min_pixels"] = self.config.data.min_pixels
             test_gen_batch.meta_info["max_pixels"] = self.config.data.max_pixels
             test_gen_batch.meta_info["video_fps"] = self.config.data.video_fps
+            test_gen_batch.meta_info["high_entropy_threshold"] = self.high_entropy_token_threshold
 
             test_gen_batch, pad_size = pad_dataproto_to_divisor(test_gen_batch, self.actor_rollout_ref_wg.world_size)
-            test_output_gen_batch = self.actor_rollout_ref_wg.generate_sequences(test_gen_batch)
+            # test_output_gen_batch = self.actor_rollout_ref_wg.generate_sequences(test_gen_batch)
+            test_output_gen_batch = self.actor_rollout_ref_wg.generate_sequences_with_tokenwise(test_gen_batch)
             test_output_gen_batch = unpad_dataproto(test_output_gen_batch, pad_size=pad_size * repeat_times)
 
             # repeat to align with repeated responses in rollout
@@ -449,9 +453,12 @@ class RayPPOTrainer:
             lengths = test_batch.batch["response_mask"].sum(dim=-1).cpu().tolist()
             global_ids = test_batch.non_tensor_batch["global_id"]
             entropies = test_batch.non_tensor_batch["entropies"]
+            tokenwise_entropy_list = test_batch.non_tensor_batch["dp_percentile_99"].tolist()
+            high_entropy_token_num = test_batch.non_tensor_batch["high_entropy_token_num"]
+            all_token_entropy_list.extend(tokenwise_entropy_list)
 
-            for gid, acc, entropy, length in zip(global_ids, accuracies,entropies, lengths):
-                uid2rollouts[gid].append({'length': length,'entropy':entropy, 'is_correct': acc > 0.5})
+            for gid, acc, entropy,high_ety_token_num, length in zip(global_ids, accuracies,entropies,high_entropy_token_num, lengths):
+                uid2rollouts[gid].append({'length': length,'entropy':entropy, "high_ety_token_num":high_ety_token_num,'is_correct': acc > 0.5})
             # store generations
             input_ids = test_batch.batch["prompts"]
             input_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in input_ids]
@@ -469,6 +476,7 @@ class RayPPOTrainer:
 
         self.actor_rollout_ref_wg.release_rollout_engine()
         # 聚合 accuracy，判定 difficulty
+        self.high_entropy_token_threshold = np.mean(all_token_entropy_list)
         difficulty_dict_val = {}
         difficulty_rollouts = defaultdict(list)
 
@@ -487,6 +495,20 @@ class RayPPOTrainer:
         # 使用 LASER-D 的 ECR 方式计算 target length
         val_difficulty_statistics = {}
         target_entropy_dict = {}
+        target_high_entropy_num_dict = {}
+
+        # 统计所有 entropy
+        all_high_entropy_token_num = []
+        for rollouts in difficulty_rollouts.values():
+            all_high_entropy_token_num.extend([r["high_ety_token_num"] for r in rollouts])
+
+        min_entropy = np.min(all_high_entropy_token_num)
+        max_entropy = np.max(all_high_entropy_token_num)
+
+        difficulty_entropy_coef = {"easy": 0.35, "medium": 0.5, "hard": 0.65}
+
+        for diff in ["easy", "medium", "hard"]:
+            target_high_entropy_num_dict[diff] = int(min_entropy + difficulty_entropy_coef[diff] * (max_entropy - min_entropy))
 
         for diff in ["easy", "medium", "hard"]:
             rollouts = difficulty_rollouts[diff]
@@ -496,10 +518,10 @@ class RayPPOTrainer:
                 self.target_length_dict[diff] = 64
                 continue
             
-            # calculate expected_entropy
-            entropies = [r["entropy"] for r in rollouts]
-            expected_entropy = np.percentile(entropies, 75)  # 例如 p75
-            target_entropy_dict[diff] = expected_entropy
+            # # calculate expected_entropy
+            # entropies = [r["entropy"] for r in rollouts]
+            # expected_entropy = np.percentile(entropies, 75)  # 例如 p75
+            # target_entropy_dict[diff] = expected_entropy
 
             min_len, max_len, interval = 96, self.config.data.max_response_length, 32
             C_d = {"easy": 6, "medium": 3, "hard": 1}[diff]
@@ -519,8 +541,9 @@ class RayPPOTrainer:
                 self.target_length_dict[diff] = max_len  # fallback
         
 
-        self.target_entropy_dict = target_entropy_dict
-        self.drop_allpass_entropy_threshold = target_entropy_dict.get("easy", 0.27) - 0.05  # 0.5 is a magic number
+        self.target_high_entropy_token_num_dict = target_high_entropy_num_dict
+        drop_ratio = 0.8  # 或者 0.4, 0.3
+        self.drop_allpass_entropy_threshold = min_entropy + drop_ratio * (self.target_high_entropy_token_num_dict['easy'] - min_entropy)
         self._maybe_log_val_generations(sample_inputs, sample_outputs, sample_labels, sample_scores)
         self.val_reward_score = torch.cat(reward_tensor_lst, dim=0).sum(-1).mean().item()
         val_reward_metrics = {f"val/{key}_reward": value for key, value in reduce_metrics(reward_metrics_lst).items()}
@@ -530,7 +553,8 @@ class RayPPOTrainer:
                 "val/target_length": self.target_length_dict,
             }
         )
-        val_reward_metrics.update({"val/self.expected_entropy": self.target_entropy_dict})
+        val_reward_metrics.update({"val/self.expected_high_entropy_token_num": self.target_high_entropy_token_num_dict})
+        val_reward_metrics.update({"val/self.high_entropy_token_threshold": self.high_entropy_token_threshold})
         # import pdb; pdb.set_trace()  # Debugging breakpoint
         print("Finish validation.")
         return {"val/reward_score": self.val_reward_score, **val_reward_metrics}
@@ -576,6 +600,7 @@ class RayPPOTrainer:
                 "min_pixels": self.config.data.min_pixels,
                 "max_pixels": self.config.data.max_pixels,
                 "video_fps": self.config.data.video_fps,
+                "high_entropy_threshold": self.high_entropy_token_threshold,
             }
             new_batch: DataProto = DataProto.from_single_dict(batch_dict, meta_info=meta_info)
 
@@ -583,7 +608,7 @@ class RayPPOTrainer:
             gen_batch = new_batch.pop(
                 batch_keys=["input_ids", "attention_mask", "position_ids"],
                 non_tensor_batch_keys=["raw_prompt_ids", "multi_modal_data"],
-                meta_info_keys=["min_pixels", "max_pixels", "video_fps"],
+                meta_info_keys=["min_pixels", "max_pixels", "video_fps", "high_entropy_threshold"],
             )
 
             # generate a batch
@@ -855,7 +880,7 @@ class RayPPOTrainer:
 
                 batch.non_tensor_batch["dynamic_token_length"] = [self.target_length_dict[self.difficulty_dict_train[gid]] for gid in global_ids]
                 batch.non_tensor_batch["difficulty"] = [self.difficulty_dict_train[gid] for gid in global_ids]
-                batch.non_tensor_batch["target_entropy"] = [self.target_entropy_dict[self.difficulty_dict_train[gid]] for gid in global_ids]
+                batch.non_tensor_batch["target_high_entropy_token_num"] = [self.target_high_entropy_token_num_dict[self.difficulty_dict_train[gid]] for gid in global_ids]
 
 
                 # compute global valid tokens

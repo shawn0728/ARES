@@ -567,6 +567,32 @@ class FSDPWorker(Worker):
         output = output.to("cpu")
         return output
 
+
+    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
+    def generate_sequences_with_tokenwise(self, prompts: DataProto):
+        assert self._has_rollout
+
+        meta_info = {
+            "eos_token_id": self.generation_config.eos_token_id
+            if self.generation_config is not None
+            else self.tokenizer.eos_token_id,
+            "pad_token_id": self.generation_config.pad_token_id
+            if self.generation_config is not None
+            else self.tokenizer.pad_token_id,
+        }
+        prompts.meta_info.update(meta_info)
+
+        # sharding preprocess
+        prompts = self.rollout_sharding_manager.preprocess_data(prompts)
+
+        # rollout inference
+        output = self.rollout.generate_sequences_with_tokenwise(prompts=prompts)
+
+        # sharding postprocess
+        output = self.rollout_sharding_manager.postprocess_data(output)
+
+        return output.to("cpu")
+
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def compute_log_probs(self, data: DataProto):
         assert self._has_actor

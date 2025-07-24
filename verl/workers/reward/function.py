@@ -131,6 +131,8 @@ class BatchFunctionRewardManager(FunctionRewardManager):
                     "accuracy": data.non_tensor_batch.get("accuracy", [None] * len(data))[i],
                     "target_length": data.non_tensor_batch.get("dynamic_token_length", [64] * len(data))[i],
                     "entropies": data.non_tensor_batch.get("entropies", [None] * len(data))[i],
+                    "high_entropy_token_num": data.non_tensor_batch.get("high_entropy_token_num", [0] * len(data))[i],
+                    "target_high_entropy_token_num": data.non_tensor_batch.get("target_high_entropy_token_num", [0] * len(data))[i],
                     "target_entropy": data.non_tensor_batch.get("target_entropy", [0.2] * len(data))[i],
                     "difficulty": data.non_tensor_batch.get("difficulty", ["easy"] * len(data))[i],
                 }

@@ -5,7 +5,8 @@ from io import BytesIO
 from PIL import Image
 from datasets import load_dataset
 import random
-def save_pil_images_and_rewrite(dataset_name="hiyouga/geometry3k", split="train", save_dir="/cpfs/user/yym/hugging_face/datasets/hiyouga_geometry3k_test/geometry3k_images", output_path="/cpfs/user/yym/hugging_face/datasets/csfufu_mmrl/geometry3k_with_paths.jsonl"):
+
+def save_pil_images_and_rewrite(dataset_name="hiyouga/geometry3k", split="train", save_dir="/cpfs/user/yym/hugging_face/datasets/hiyouga_geometry3k_train_new/geometry3k_images", output_path="/cpfs/user/yym/hugging_face/datasets/csfufu_mmrl/geometry3k_with_paths.jsonl"):
     os.makedirs(save_dir, exist_ok=True)
 
     ds = load_dataset(dataset_name, split=split)
@@ -30,6 +31,7 @@ def save_pil_images_and_rewrite(dataset_name="hiyouga/geometry3k", split="train"
                     "global_id": f"{dataset_name.replace('/', '_')}-{split}-{idx:06d}"
                 }, ensure_ascii=False) + "\n"
             )
+
 def save_base64_images(
     dataset_name="csfufu/mmrl",
     split="train",
@@ -70,6 +72,7 @@ def save_base64_images(
                     "global_id": f"{dataset_name.replace('/', '_')}-{split}-{idx:06d}"
                 }, ensure_ascii=False) + "\n"
             )
+
 def split_train_test_jsonl(file_path="/cpfs/user/yym/hugging_face/datasets/csfufu_mmrl/csfufu_mmrl.jsonl",test_ratio=0.1,test_sample_num=1000):
 
     # 输入输出路径
@@ -99,8 +102,9 @@ def split_train_test_jsonl(file_path="/cpfs/user/yym/hugging_face/datasets/csfuf
 
     print(f"✅ 写入完成：训练集 {len(train_lines)} 条，验证集 {len(val_lines)} 条")
 def main():
+    save_pil_images_and_rewrite()
     # save_base64_images()
-    split_train_test_jsonl()
+    # split_train_test_jsonl()
 
 if __name__ == "__main__":
     main()

@@ -16,6 +16,7 @@ import json
 
 import ray
 from omegaconf import OmegaConf
+import os
 
 from ..single_controller.ray import RayWorkerGroup
 from ..utils.tokenizer import get_processor, get_tokenizer
@@ -133,6 +134,8 @@ def main():
                 "TORCH_NCCL_AVOID_RECORD_STREAMS": "1",
                 "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:False",
                 "PYTHONUNBUFFERED": "1",
+                "WANDB_API_KEY": os.environ.get("WANDB_API_KEY", ""),
+                "WANDB_BASE_URL": os.environ.get("WANDB_BASE_URL", "https://api.wandb.ai"),
             }
         }
         ray.init(runtime_env=runtime_env)
