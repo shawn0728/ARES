@@ -18,6 +18,7 @@ import numpy as np
 import torch
 
 from ..protocol import DataProto
+from collections import defaultdict
 
 
 def reduce_metrics(metrics: Dict[str, List[Any]]) -> Dict[str, Any]:
@@ -48,6 +49,60 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = False) -> Dict[str
         valid_values = torch.masked_select(values, response_mask)
         return_diff_var = torch.var(valid_returns - valid_values)
         return_var = torch.var(valid_returns)
+
+    difficulty_list = batch.non_tensor_batch["difficulty"]  # List[str] of same length as batch size
+    response_length_np = response_length.cpu().numpy()  # (batch_size,) -> NumPy for easier indexing
+
+    # 分桶统计 response_length
+    bucketed_stats = defaultdict(list)
+    for i, difficulty in enumerate(difficulty_list):
+        bucketed_stats[difficulty].append(response_length_np[i])
+
+    bucketed_metrics = {}
+    for difficulty, lengths in bucketed_stats.items():
+        lengths_tensor = torch.tensor(lengths, dtype=torch.float32)
+        bucketed_metrics[f"response_length/{difficulty}/mean"] = torch.mean(lengths_tensor).detach().item()
+        bucketed_metrics[f"response_length/{difficulty}/max"] = torch.max(lengths_tensor).detach().item()
+        bucketed_metrics[f"response_length/{difficulty}/min"] = torch.min(lengths_tensor).detach().item()
+        bucketed_metrics[f"response_length/{difficulty}/count"] = len(lengths)
+
+    # === [NEW METRIC] accuracy vs high_entropy_token_num for all difficulty ===
+    entropy_acc_metrics = defaultdict(list)
+    for target_difficulty in ["easy", "medium", "hard"]:
+        entropy_list = []
+        accuracy_list = []
+
+        for i, difficulty in enumerate(difficulty_list):
+            if difficulty == target_difficulty:
+                entropy = batch.non_tensor_batch["high_entropy_token_num"][i]
+                acc = batch.non_tensor_batch["accuracy"][i]
+                entropy_list.append(entropy)
+                accuracy_list.append(acc)
+
+        if len(entropy_list) >= 3:
+            entropy_arr = np.array(entropy_list)
+            acc_arr = np.array(accuracy_list)
+
+            min_e = int(np.min(entropy_arr))
+            max_e = int(np.max(entropy_arr))
+            bin_edges = np.linspace(min_e, max_e, 4, dtype=int)  # 3段 -> 4个边界（int）
+
+            for i in range(3):
+                start = bin_edges[i]
+                end = bin_edges[i + 1]
+                # 注意最后一段包含 end
+                if i < 2:
+                    mask = (entropy_arr >= start) & (entropy_arr < end)
+                else:
+                    mask = (entropy_arr >= start) & (entropy_arr <= end)
+                bin_tag = f"bin{i+1}"
+                if mask.sum() > 0:
+                    avg_acc = float(np.mean(acc_arr[mask]))
+                else:
+                    avg_acc = float("nan")
+
+                entropy_acc_metrics[f"entropy vs acc/{target_difficulty}/accuracy/{bin_tag}"] = avg_acc
+                entropy_acc_metrics[f"entropy vs acc/{target_difficulty}/count/{bin_tag}"] = int(mask.sum())
 
     metrics = {
         # score
@@ -91,6 +146,8 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = False) -> Dict[str
         "prompt_length/min": torch.min(prompt_length).detach().item(),
         "prompt_length/clip_ratio": torch.mean(torch.eq(prompt_length, max_prompt_length).float()).detach().item(),
     }
+    metrics.update(bucketed_metrics)
+    metrics.update(entropy_acc_metrics)
     return metrics
 
 

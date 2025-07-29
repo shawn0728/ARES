@@ -6,8 +6,8 @@ data:
   answer_key: answer
   image_key: images
   image_dir: null
-  max_prompt_length: 4096
-  max_response_length: 8192
+  max_prompt_length: 1024
+  max_response_length: 1024
   rollout_batch_size: 512  # equivalent to verl's data.train_batch_size
   # rollout_batch_size: 128
   mini_rollout_batch_size: null  # equivalent to verl's data.gen_batch_size
@@ -18,7 +18,7 @@ data:
   seed: 1
   min_pixels: 262144
   max_pixels: 4194304
-  filter_overlong_prompts: true
+  filter_overlong_prompts: False
 
 algorithm:
   adv_estimator: grpo

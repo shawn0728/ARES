@@ -23,8 +23,8 @@ MODEL_PATH=/cpfs/user/yym/models/adaptive-mm-v02  # replace it with your local f
 
 python3 -m verl.trainer.main \
     config=/cpfs/user/yym/projects/Adaptive-VL-worktrees/exp_crucial_token_entropy/experiments/${EXPERIMENT_NAME}/config.yaml \
-    data.train_files=/cpfs/user/yym/hugging_face/datasets/hiyouga_geometry3k_train/geometry3k_with_paths.jsonl \
-    data.val_files=/cpfs/user/yym/hugging_face/datasets/hiyouga_geometry3k_test/geometry3k_with_paths.jsonl \
+    data.train_files=/cpfs/data/hude/dataset/data_curation/ViRL39K_dataset/only@train \
+    data.val_files=/cpfs/user/yym/hugging_face/datasets/MMK12_geometry3k/MMK12_geometry3k_w_global_id_fixed_question.parquet \
     data.rollout_batch_size=256 \
     worker.actor.model.model_path=${MODEL_PATH} \
     worker.actor.fsdp.torch_dtype=bf16 \

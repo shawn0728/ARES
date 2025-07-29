@@ -21,6 +21,10 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 import torch
 from datasets import load_dataset
+
+from datasets import Features, Sequence, Value
+from datasets.features import Image as HFImage
+
 from jinja2 import Template
 from PIL import Image
 from PIL.Image import Image as ImageObject
@@ -134,6 +138,16 @@ class RLHFDataset(Dataset):
         elif os.path.isfile(data_path):
             file_type = os.path.splitext(data_path)[-1][1:].replace("jsonl", "json")
             self.dataset = load_dataset(file_type, data_files=data_path, split=data_split)
+            if file_type == "parquet":
+                features = Features({
+                    "images": Sequence(HFImage()),
+                    "problem": Value("string"),
+                    "answer": Value("string"),
+                    "global_id": Value("string"),
+                })
+                self.dataset = load_dataset(file_type, data_files=data_path, split=data_split, features=features)
+            else:
+                self.dataset = load_dataset(file_type, data_files=data_path, split=data_split)
         else:
             # load remote dataset from huggingface hub
             self.dataset = load_dataset(data_path, split=data_split)

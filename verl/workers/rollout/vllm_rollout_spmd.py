@@ -14,8 +14,8 @@
 
 import os
 from contextlib import contextmanager
-from typing import Any, Dict, List, Optional, Union
-
+from typing import Any, Dict, List, Optional, Union, Set
+import re
 import numpy as np
 import torch
 import torch.distributed
@@ -127,22 +127,71 @@ def compute_high_entropy_token_num_from_logprobs_dynamic(logprobs_per_token_list
 
     return high_entropy_token_num_list, threshold
 
+def normalize_token(token: str) -> str:
+    """
+    Normalize token string by removing leading special characters and converting to lowercase.
+    """
+    token = re.sub(r"^[▁Ġ]+", "", token)  # remove leading special characters
+    token = token.strip().lower()
+    return token
 
-
-
-
-def compute_high_entropy_token_num_from_logprobs(logprobs_per_token_list: List[List[Dict[int, Any]]], threshold: float = 0.5) -> List[int]:
+def compute_high_entropy_token_num_from_logprobs(
+    logprobs_per_token_list: List[List[Dict[int, Any]]],
+    tokenizer,
+    threshold: float = 0.5,
+    reasoning_token_set: Set[str] = None
+) -> List[int]:
+    """
+    Count high entropy tokens that are also in reasoning_token_set.
+    """
     high_entropy_token_num_list = []
+
     for logprobs_per_token in logprobs_per_token_list:
         high_entropy_count = 0
         for logprob_dict in logprobs_per_token:
             log_probs = np.array([logprob.logprob for logprob in logprob_dict.values()], dtype=np.float32)
             probs = np.exp(log_probs)
             entropy = -np.sum(probs * log_probs)
+
             if entropy > threshold:
-                high_entropy_count += 1
+                # get the token string of top-1 token
+                top_token_id = max(logprob_dict.items(), key=lambda x: x[1].logprob)[0]
+                token_str = tokenizer.decode([top_token_id])
+                token_str = normalize_token(token_str)
+
+                if reasoning_token_set is None or token_str in reasoning_token_set:
+                    high_entropy_count += 1
+
         high_entropy_token_num_list.append(high_entropy_count)
+
     return high_entropy_token_num_list
+
+
+def load_reasoning_token_set(json_path: str) -> Set[str]:
+    with open(json_path, "r", encoding="utf-8") as f:
+        token_dict = json.load(f)
+    return set(token_dict.keys())  # 只保留token的集合即可
+
+
+
+def get_percentile_threshold_list(logprobs_per_token_list: List[List[Dict[int, Any]]],percentile: float = 99.0) -> List[float]:
+    # get 99 percentile threshold for each sample and return a list
+    percentile_threshold_list = []
+    for logprobs_per_token in logprobs_per_token_list:
+        token_entropies = []
+        for logprob_dict in logprobs_per_token:  # limit token count if needed
+            log_probs = np.array([logprob.logprob for logprob in logprob_dict.values()], dtype=np.float32)
+            probs = np.exp(log_probs)
+            entropy = -np.sum(probs * log_probs)
+            token_entropies.append(entropy)
+        if token_entropies:  # avoid crash on empty list
+            sample_percentile = np.percentile(token_entropies, percentile)
+        else:
+            sample_percentile = 0.0  # or np.nan if you prefer signaling missing data
+        percentile_threshold_list.append(sample_percentile)
+
+    return percentile_threshold_list
+
 
 class vLLMRollout(BaseRollout):
     def __init__(
@@ -278,7 +327,14 @@ class vLLMRollout(BaseRollout):
             entropy_list = compute_entropy_from_logprobs(logprobs_per_token_list)
             tokenwise_entropy_list = collect_global_token_entropy_from_logprobs(logprobs_per_token_list)
             # import ipdb;ipdb.set_trace()
-            high_entropy_token_num_list = compute_high_entropy_token_num_from_logprobs(logprobs_per_token_list, threshold=high_entropy_threshold)
+            reasoning_token_set = load_reasoning_token_set("/cpfs/user/yym/projects/Adaptive-VL-worktrees/exp_crucial_token_entropy/mess/crucial_token_final_version.json")
+            # high_entropy_token_num_list = compute_high_entropy_token_num_from_logprobs(logprobs_per_token_list, threshold=high_entropy_threshold)
+            high_entropy_token_num_list = compute_high_entropy_token_num_from_logprobs(
+                logprobs_per_token_list,
+                tokenizer=self.tokenizer,
+                threshold=high_entropy_threshold,
+                reasoning_token_set=reasoning_token_set
+            )
             # high_entropy_token_num_list,calculated_threshold = compute_high_entropy_token_num_from_logprobs_dynamic(logprobs_per_token_list)
             print("[Debug] Calculated high entropy threshold:", high_entropy_threshold)
 
@@ -336,7 +392,18 @@ class vLLMRollout(BaseRollout):
         return DataProto(batch=batch, non_tensor_batch=non_tensor_batch, meta_info=prompts.meta_info)
 
 
-
+    # def compute_high_entropy_token_num_from_logprobs(logprobs_per_token_list: List[List[Dict[int, Any]]], threshold: float = 0.5) -> List[int]:
+    #     high_entropy_token_num_list = []
+    #     for logprobs_per_token in logprobs_per_token_list:
+    #         high_entropy_count = 0
+    #         for logprob_dict in logprobs_per_token:
+    #             log_probs = np.array([logprob.logprob for logprob in logprob_dict.values()], dtype=np.float32)
+    #             probs = np.exp(log_probs)
+    #             entropy = -np.sum(probs * log_probs)
+    #             # if entropy > threshold:
+    #             #     high_entropy_count += 1
+    #         high_entropy_token_num_list.append(high_entropy_count)
+    #     return high_entropy_token_num_list
     def record_high_entropy_tokens(self, logprobs_per_token_list, threshold):
         """
         Record tokens with entropy greater than threshold into a log file.
@@ -361,7 +428,7 @@ class vLLMRollout(BaseRollout):
                 if ent > threshold:
                     high_entropy_tokens.append({"token": tok, "entropy": float(ent)})
 
-        with open("/cpfs/user/yym/projects/Adaptive-VL-worktrees/exp_crucial_token_entropy/mess/token_entropy_log.jsonl", "a") as f:
+        with open("/cpfs/user/yym/projects/Adaptive-VL-worktrees/exp_crucial_token_entropy/mess/token_entropy_log_0724_cs_v02_total_geometry3k.jsonl", "a") as f:
             for item in high_entropy_tokens:
                 f.write(json.dumps(item, ensure_ascii=False) + "\n")
 
@@ -420,10 +487,9 @@ class vLLMRollout(BaseRollout):
                     token_entropies.append(entropy)
                 tokenwise_entropy_list.append(token_entropies)
                 tokenwise_entropy_flat.extend(token_entropies)
+            percentile_threshold_list = get_percentile_threshold_list(logprobs_per_token_list, percentile=99.0)
 
-            high_entropy_token_num_list = compute_high_entropy_token_num_from_logprobs(
-                logprobs_per_token_list, threshold=high_entropy_threshold
-            )
+            high_entropy_token_num_list = compute_high_entropy_token_num_from_logprobs(logprobs_per_token_list, tokenizer = self.tokenizer,threshold=high_entropy_threshold)
 
             print(f"[Debug] Calculated high entropy threshold used in filtering: {high_entropy_threshold}")
 
@@ -454,9 +520,9 @@ class vLLMRollout(BaseRollout):
             response_ids=response_ids, eos_token_id=eos_token_id, dtype=attention_mask.dtype
         )
         attention_mask = torch.cat((attention_mask, response_mask), dim=-1)
-        percentile_99 = np.percentile(tokenwise_entropy_flat, 99.0)
+        tokenwise_entropy_threshold = np.percentile(tokenwise_entropy_flat, 99.0)
 
-        # self.record_high_entropy_tokens(logprobs_per_token_list, percentile_99)
+        # self.record_high_entropy_tokens(logprobs_per_token_list, tokenwise_entropy_threshold)
         
         batch = TensorDict(
             {
@@ -473,7 +539,8 @@ class vLLMRollout(BaseRollout):
         non_tensor_batch_out = {
             "entropies": entropy_list,
             "high_entropy_token_num": high_entropy_token_num_list,
-            "dp_percentile_99": np.array([percentile_99] * batch_size, dtype=np.float32),
+            "tokenwise_entropy_threshold": np.array([tokenwise_entropy_threshold] * batch_size, dtype=np.float32),
+            "entropy_percentile_thresholds": percentile_threshold_list,
         }
         if batch_multi_modal_data is not None:
             non_tensor_batch_out["multi_modal_data"] = batch_multi_modal_data

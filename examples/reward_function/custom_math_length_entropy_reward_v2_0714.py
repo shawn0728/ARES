@@ -61,6 +61,15 @@ def entropy_reward(gen_entropy, target_entropy, difficulty,alpha=0.5):
             entropy_reward = 0.0
     return entropy_reward * alpha
 
+def soft_overlong_punishment(response_length: int, max_response_length: int, overlong_buffer_length: int):
+    expected_len = max_response_length - overlong_buffer_length
+    if response_length <= expected_len:
+        return 0.0
+    elif response_length <= max_response_length:
+        return (expected_len - response_length) / overlong_buffer_length
+    else:
+        return -1.0
+
 
 def compute_score(reward_inputs: List[Dict[str, Any]], format_weight: float = 0.1,alpha_length_bonus: float = 0.5, alpha_entropy: float = 0.5) -> List[Dict[str, float]]:
     if not isinstance(reward_inputs, list):
@@ -72,6 +81,11 @@ def compute_score(reward_inputs: List[Dict[str, Any]], format_weight: float = 0.
             gen_len=reward_input["response_length"],
             target_L=reward_input.get("target_length", DEFAULT_TARGET_LENGTH),
             alpha=alpha_length_bonus
+        )
+        soft_overlong_punishment_score = soft_overlong_punishment(
+            response_length=reward_input["response_length"],
+            max_response_length=16384,  # default max response length
+            overlong_buffer_length=1024  # default overlong buffer length
         )
         entropy_penalty_score = 0.0
         gen_entropy = reward_input.get("entropies",0.3)  # Assuming entropies is a list with one element
@@ -105,13 +119,14 @@ def compute_score(reward_inputs: List[Dict[str, Any]], format_weight: float = 0.
                     overall_score -= entropy_penalty_score
 
 
-        overall_score += format_weight * format_score + accuracy_score
+        overall_score += format_weight * soft_overlong_punishment_score + accuracy_score
         scores.append({
             "overall": overall_score,
             "accuracy": accuracy_score,
             "format": format_score,
             "length_bonus": length_bonus,
-            "entropy_penalty_score": entropy_penalty_score
+            "entropy_penalty_score": entropy_penalty_score,
+            "soft_overlong_punishment": soft_overlong_punishment_score,
         })
 
     return scores

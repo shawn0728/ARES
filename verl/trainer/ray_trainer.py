@@ -201,7 +201,7 @@ class RayPPOTrainer:
         self.epoch_update_iter = 0
         self.epoch_id = 0
         self.drop_allpass_entropy_threshold = -1
-        self.high_entropy_token_threshold = 1.5
+        self.high_entropy_token_threshold = -1
         # define KL control
         if config.algorithm.disable_kl:
             self.use_reference_policy = False
@@ -453,7 +453,7 @@ class RayPPOTrainer:
             lengths = test_batch.batch["response_mask"].sum(dim=-1).cpu().tolist()
             global_ids = test_batch.non_tensor_batch["global_id"]
             entropies = test_batch.non_tensor_batch["entropies"]
-            tokenwise_entropy_list = test_batch.non_tensor_batch["dp_percentile_99"].tolist()
+            tokenwise_entropy_list = test_batch.non_tensor_batch["tokenwise_entropy_threshold"].tolist()
             high_entropy_token_num = test_batch.non_tensor_batch["high_entropy_token_num"]
             all_token_entropy_list.extend(tokenwise_entropy_list)
 
@@ -475,8 +475,9 @@ class RayPPOTrainer:
                 reward_metrics_lst[key].extend(value)
 
         self.actor_rollout_ref_wg.release_rollout_engine()
-        # 聚合 accuracy，判定 difficulty
-        self.high_entropy_token_threshold = np.mean(all_token_entropy_list)
+        # 聚合 accuracy，判定 difficulty，如果 high_entropy_token_threshold 未设置(初始validation），则使用所有 token 的平均 entropy
+        if self.high_entropy_token_threshold < 0:
+            self.high_entropy_token_threshold = np.mean(all_token_entropy_list)
         difficulty_dict_val = {}
         difficulty_rollouts = defaultdict(list)
 
@@ -518,10 +519,10 @@ class RayPPOTrainer:
                 self.target_length_dict[diff] = 64
                 continue
             
-            # # calculate expected_entropy
-            # entropies = [r["entropy"] for r in rollouts]
-            # expected_entropy = np.percentile(entropies, 75)  # 例如 p75
-            # target_entropy_dict[diff] = expected_entropy
+            # calculate expected_entropy
+            entropies = [r["entropy"] for r in rollouts]
+            expected_entropy = np.percentile(entropies, 75)  # 例如 p75
+            target_entropy_dict[diff] = expected_entropy
 
             min_len, max_len, interval = 96, self.config.data.max_response_length, 32
             C_d = {"easy": 6, "medium": 3, "hard": 1}[diff]
@@ -541,18 +542,18 @@ class RayPPOTrainer:
                 self.target_length_dict[diff] = max_len  # fallback
         
 
-        self.target_high_entropy_token_num_dict = target_high_entropy_num_dict
-        drop_ratio = 0.8  # 或者 0.4, 0.3
-        self.drop_allpass_entropy_threshold = min_entropy + drop_ratio * (self.target_high_entropy_token_num_dict['easy'] - min_entropy)
+        # self.target_high_entropy_token_num_dict = target_high_entropy_num_dict
+        # drop_ratio = 0.8  # 或者 0.4, 0.3
+        # self.drop_allpass_entropy_threshold = min_entropy + drop_ratio * (self.target_high_entropy_token_num_dict['easy'] - min_entropy)
         self._maybe_log_val_generations(sample_inputs, sample_outputs, sample_labels, sample_scores)
         self.val_reward_score = torch.cat(reward_tensor_lst, dim=0).sum(-1).mean().item()
         val_reward_metrics = {f"val/{key}_reward": value for key, value in reduce_metrics(reward_metrics_lst).items()}
-        val_reward_metrics.update(
-            {
-                "val/difficulty_statistics": val_difficulty_statistics,
-                "val/target_length": self.target_length_dict,
-            }
-        )
+        # val_reward_metrics.update(
+        #     {
+        #         "val/difficulty_statistics": val_difficulty_statistics,
+        #         "val/target_length": self.target_length_dict,
+        #     }
+        # )
         val_reward_metrics.update({"val/self.expected_high_entropy_token_num": self.target_high_entropy_token_num_dict})
         val_reward_metrics.update({"val/self.high_entropy_token_threshold": self.high_entropy_token_threshold})
         # import pdb; pdb.set_trace()  # Debugging breakpoint
@@ -612,7 +613,8 @@ class RayPPOTrainer:
             )
 
             # generate a batch
-            gen_batch_output = self.actor_rollout_ref_wg.generate_sequences(gen_batch)
+            # gen_batch_output = self.actor_rollout_ref_wg.generate_sequences(gen_batch)
+            gen_batch_output = self.actor_rollout_ref_wg.generate_sequences_with_tokenwise(gen_batch)
 
             if self.config.algorithm.adv_estimator == "remax":
                 gen_baseline_batch = deepcopy(gen_batch)
@@ -763,33 +765,49 @@ class RayPPOTrainer:
         return accuracies
     
     def update_difficulty_and_skip_gid_set(self, batch: DataProto) -> None:
-        """
-        Update the difficulty_dict_train and skip_gid_set based on the current batch.
-        This function is called after each training step.
-        """
         global_ids = batch.non_tensor_batch["global_id"]
         accuracies = batch.non_tensor_batch["accuracy"]
         entropies = batch.non_tensor_batch["entropies"]
+        high_entropy_token_nums = batch.non_tensor_batch["high_entropy_token_num"]
+        difficulty_coefficient = {
+            "easy": 0.25,
+            "medium": 0.5,
+            "hard": 0.75,
+        }
+        uid_info = defaultdict(lambda: {"acc": [], "entropy": [], "high_entropy_token_num": []})
+        difficulty_bucket = defaultdict(list)
 
-        uid2acc = defaultdict(list)
-        uid2ety = defaultdict(list)
+        for gid, acc, entropy, tokennum in zip(global_ids, accuracies, entropies, high_entropy_token_nums):
+            uid_info[gid]["acc"].append(acc)
+            uid_info[gid]["entropy"].append(entropy)
+            uid_info[gid]["high_entropy_token_num"].append(tokennum)
 
-        for gid, acc, entropy in zip(global_ids, accuracies, entropies):
-            uid2acc[gid].append(acc)
-            uid2ety[gid].append(entropy)
-
-        for gid in uid2acc:
-            acc_rate = np.mean(uid2acc[gid])
-            mean_entropy = np.mean(uid2ety[gid])
-            if acc_rate == 1.0 and mean_entropy < self.drop_allpass_entropy_threshold:
-                self.skip_gid_set.add(gid)
+        for gid, info in uid_info.items():
+            acc_rate = np.mean(info["acc"])
+            mean_token_num = np.mean(info["high_entropy_token_num"])
+            # dynamic sampling here
+            # if acc_rate == 1.0 and mean_entropy < self.drop_allpass_entropy_threshold:
+            #     self.skip_gid_set.add(gid)
             if acc_rate >= 2 / 3:
-                self.difficulty_dict_train[gid] = "easy"
+                difficulty = "easy"
             elif acc_rate >= 1 / 3:
-                self.difficulty_dict_train[gid] = "medium"
+                difficulty = "medium"
             else:
-                self.difficulty_dict_train[gid] = "hard"
+                difficulty = "hard"
 
+            self.difficulty_dict_train[gid] = difficulty
+            difficulty_bucket[difficulty].append(mean_token_num)
+
+        for diff, values in difficulty_bucket.items():
+            self.target_high_entropy_token_num_dict[diff] = round(difficulty_coefficient[diff] * np.mean(values))
+            
+        drop_ratio = 0.8
+        if difficulty_bucket["easy"]:
+            min_entropy = min(difficulty_bucket["easy"])
+            self.drop_allpass_entropy_threshold = min_entropy + drop_ratio * (
+                self.target_high_entropy_token_num_dict["easy"] - min_entropy
+            )
+        self.drop_allpass_entropy_threshold = min_entropy + drop_ratio * (self.target_high_entropy_token_num_dict['easy'] - min_entropy)
         print(f"[Train] Updated difficulty_dict, size={len(self.difficulty_dict_train)}")
 
     def fit(self):
@@ -875,9 +893,12 @@ class RayPPOTrainer:
                 self._balance_batch(batch, metrics=metrics)
                 
                 batch.non_tensor_batch['accuracy'] = self.compute_batch_accuracy(batch)
-                global_ids = batch.non_tensor_batch["global_id"]
-                self.update_difficulty_and_skip_gid_set(batch)
 
+
+                # use training batch to determine the high_entropy_token_threshold
+                global_ids = batch.non_tensor_batch["global_id"]
+                self.high_entropy_token_threshold = np.mean(batch.non_tensor_batch["entropy_percentile_thresholds"])
+                self.update_difficulty_and_skip_gid_set(batch)
                 batch.non_tensor_batch["dynamic_token_length"] = [self.target_length_dict[self.difficulty_dict_train[gid]] for gid in global_ids]
                 batch.non_tensor_batch["difficulty"] = [self.difficulty_dict_train[gid] for gid in global_ids]
                 batch.non_tensor_batch["target_high_entropy_token_num"] = [self.target_high_entropy_token_num_dict[self.difficulty_dict_train[gid]] for gid in global_ids]

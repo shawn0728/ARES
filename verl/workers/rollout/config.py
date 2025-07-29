@@ -36,7 +36,7 @@ class RolloutConfig:
     tensor_parallel_size: int = 2
     max_model_len: Optional[int] = None
     # max_num_batched_tokens: int = 8192
-    max_num_batched_tokens: int = 12288
+    max_num_batched_tokens: int = 40000
     disable_log_stats: bool = True
     disable_tqdm: bool = False
     val_override_config: Dict[str, Any] = field(default_factory=dict)

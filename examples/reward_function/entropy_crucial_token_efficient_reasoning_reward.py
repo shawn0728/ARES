@@ -108,7 +108,8 @@ def compute_score(reward_inputs: List[Dict[str, Any]], format_weight: float = 0.
                     overall_score += entropy_score
 
 
-        overall_score += format_weight * format_score + accuracy_score
+        # overall_score += format_weight * format_score + accuracy_score
+        overall_score += accuracy_score
         scores.append({
             "overall": overall_score,
             "accuracy": accuracy_score,
