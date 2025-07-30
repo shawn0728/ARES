@@ -8,10 +8,10 @@ data:
   image_dir: null
   max_prompt_length: 4096
   max_response_length: 16384
-  rollout_batch_size: 2048  # equivalent to verl's data.train_batch_size
+  rollout_batch_size: 512  # equivalent to verl's data.train_batch_size
   # rollout_batch_size: 128
   mini_rollout_batch_size: null  # equivalent to verl's data.gen_batch_size
-  val_batch_size: 8192
+  val_batch_size: 1024
   format_prompt: ./examples/format_prompt/math.jinja
   override_chat_template: null
   shuffle: true
@@ -33,8 +33,7 @@ algorithm:
 
 worker:
   actor:
-    # global_batch_size: 128  # equivalent to verl's actor.ppo_mini_batch_size
-    global_batch_size: 128
+    global_batch_size: 128  # equivalent to verl's actor.ppo_mini_batch_size
     micro_batch_size_per_device_for_update: 4  # equivalent to verl's actor.ppo_micro_batch_size_per_gpu
     micro_batch_size_per_device_for_experience: 16  # equivalent to verl's rollout.log_prob_micro_batch_size_per_gpu
     max_grad_norm: 1.0
@@ -71,9 +70,9 @@ worker:
     disable_tqdm: false
     val_override_config:
       # temperature: 0.5
-      temperature: 0.7
+      temperature: 0.5
       # n: 1
-      n: 1
+      n: 8
 
   ref:
     fsdp:
@@ -86,7 +85,7 @@ worker:
   reward:
     reward_type: batch
     # reward_function: ./examples/reward_function/math.py:compute_score
-    reward_function: ./examples/reward_function/entropy_crucial_token_efficient_reasoning_reward.py:compute_score
+    reward_function: ./examples/reward_function/smooth_entropy_crucial_token_efficient_reasoning_reward.py:compute_score
 
 trainer:
   total_epochs: 250

@@ -770,9 +770,9 @@ class RayPPOTrainer:
         entropies = batch.non_tensor_batch["entropies"]
         high_entropy_token_nums = batch.non_tensor_batch["high_entropy_token_num"]
         difficulty_coefficient = {
-            "easy": 0.25,
-            "medium": 0.5,
-            "hard": 0.75,
+            "easy": 0.75,
+            "medium": 1.0,
+            "hard": 1.25,
         }
         uid_info = defaultdict(lambda: {"acc": [], "entropy": [], "high_entropy_token_num": []})
         difficulty_bucket = defaultdict(list)
