@@ -14,11 +14,11 @@ export WANDB_BASE_URL=https://api.wandb.ai
 # fufu的api key
 export WANDB_API_KEY="9c62933f71d04da55b4bc9e7f61f72356dfbf071"
 PROJECT_NAME=Adaptive_thinking
-RUN_ID=adaptive_cs_v2_VIRL39k_grpo_crucial_tk_entropy_dynamic_sampling_multinode_0731_correct_bucket_coef
+RUN_ID=EY1.1_VIRL39K_correct_bucket_coef
 
 export PYTHONUNBUFFERED=1
 
-EXPERIMENT_NAME=adaptive_cs_v2_VIRL39k_grpo_crucial_tk_entropy_dynamic_sampling_multinode_0731_correct_bucket_coef
+EXPERIMENT_NAME=EY1.1_VIRL39K_correct_bucket_coef
 MODEL_PATH=/cpfs/user/yym/models/adaptive-mm-v02  # replace it with your local file path
 
 python3 -m verl.trainer.main \

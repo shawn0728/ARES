@@ -104,6 +104,25 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = False) -> Dict[str
                 entropy_acc_metrics[f"entropy vs acc/{target_difficulty}/accuracy/{bin_tag}"] = avg_acc
                 entropy_acc_metrics[f"entropy vs acc/{target_difficulty}/count/{bin_tag}"] = int(mask.sum())
 
+    # === [NEW METRIC] valid / invalid reasoning token count per difficulty ===
+    reasoning_token_metrics = defaultdict(list)
+
+    for target_difficulty in ["easy", "medium", "hard"]:
+        valid_list = []
+        invalid_list = []
+
+        for i, difficulty in enumerate(difficulty_list):
+            if difficulty == target_difficulty:
+                valid = batch.non_tensor_batch.get("valid_reasoning_token_num", [0] * len(difficulty_list))[i]
+                invalid = batch.non_tensor_batch.get("invalid_reasoning_token_num", [0] * len(difficulty_list))[i]
+                valid_list.append(valid)
+                invalid_list.append(invalid)
+
+        if len(valid_list) >= 1:
+            reasoning_token_metrics[f"reasoning_tokens_statistics/{target_difficulty}/valid_mean"] = float(np.mean(valid_list))
+            reasoning_token_metrics[f"reasoning_tokens_statistics/{target_difficulty}/invalid_mean"] = float(np.mean(invalid_list))
+            reasoning_token_metrics[f"reasoning_tokens_statistics/{target_difficulty}/count"] = len(valid_list)
+
     metrics = {
         # score
         "critic/score/mean": torch.mean(sequence_score).detach().item(),

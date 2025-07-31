@@ -438,8 +438,8 @@ class RayPPOTrainer:
             test_gen_batch.meta_info["high_entropy_threshold"] = self.high_entropy_token_threshold
 
             test_gen_batch, pad_size = pad_dataproto_to_divisor(test_gen_batch, self.actor_rollout_ref_wg.world_size)
-            # test_output_gen_batch = self.actor_rollout_ref_wg.generate_sequences(test_gen_batch)
-            test_output_gen_batch = self.actor_rollout_ref_wg.generate_sequences_with_tokenwise(test_gen_batch)
+            test_output_gen_batch = self.actor_rollout_ref_wg.generate_sequences(test_gen_batch)
+            # test_output_gen_batch = self.actor_rollout_ref_wg.generate_sequences_with_tokenwise(test_gen_batch)
             test_output_gen_batch = unpad_dataproto(test_output_gen_batch, pad_size=pad_size * repeat_times)
 
             # repeat to align with repeated responses in rollout
@@ -613,8 +613,8 @@ class RayPPOTrainer:
             )
 
             # generate a batch
-            # gen_batch_output = self.actor_rollout_ref_wg.generate_sequences(gen_batch)
-            gen_batch_output = self.actor_rollout_ref_wg.generate_sequences_with_tokenwise(gen_batch)
+            gen_batch_output = self.actor_rollout_ref_wg.generate_sequences(gen_batch)
+            # gen_batch_output = self.actor_rollout_ref_wg.generate_sequences_with_tokenwise(gen_batch)
 
             if self.config.algorithm.adv_estimator == "remax":
                 gen_baseline_batch = deepcopy(gen_batch)
@@ -770,9 +770,9 @@ class RayPPOTrainer:
         entropies = batch.non_tensor_batch["entropies"]
         high_entropy_token_nums = batch.non_tensor_batch["high_entropy_token_num"]
         difficulty_coefficient = {
-            "easy": 0.75,
+            "easy": 1.0,
             "medium": 1.0,
-            "hard": 1.25,
+            "hard": 1.0,
         }
         uid_info = defaultdict(lambda: {"acc": [], "entropy": [], "high_entropy_token_num": []})
         difficulty_bucket = defaultdict(list)
