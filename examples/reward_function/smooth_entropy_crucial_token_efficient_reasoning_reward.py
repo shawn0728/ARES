@@ -17,6 +17,7 @@ import numpy as np
 from typing import Any, Dict, List
 
 from mathruler.grader import extract_boxed_content, grade_answer
+import math
 
 DEFAULT_TARGET_LENGTH = 64  # fallback value
 DEFAULT_TARGET_ENTROPY = 0.2
@@ -40,6 +41,21 @@ def laser_d_length_reward(gen_len, target_L, alpha=0.5):
         return 0.0
 
 
+def _huber_penalty(x: float, kappa: float) -> float:
+    """Smooth penalty for x>=0; quadratic near 0, linear in tail."""
+    x = max(float(x), 0.0)
+    return 0.5 * x * x / kappa if x <= kappa else x - 0.5 * kappa
+
+def _sigmoid_saturate(x: float, temp: float) -> float:
+    """Saturating [0,1] growth; temp controls softness."""
+    t = max(float(temp), 1e-6)
+    return 1.0 / (1.0 + math.exp(-x / t))
+
+def _margin_from_target(target: float, frac: float, min_margin: float = 1.0) -> float:
+    """Difficulty-aware tolerance band around target."""
+    tgt = max(float(target), 1.0)
+    return max(min_margin, frac * tgt)
+
 def smooth_entropy_score(gen: float, target: float, mode: str = "lt", scale: float = 1.0) -> float:
     """
     平滑的熵 token 数奖励函数，基于 sigmoid 曲线。
@@ -48,6 +64,7 @@ def smooth_entropy_score(gen: float, target: float, mode: str = "lt", scale: flo
     返回值 ∈ [0, scale]，或用于负向惩罚
     """
     diff = gen - target
+    diff = np.clip(diff, -50, 50) 
     if mode == "lt":
         score = scale * (1.0 / (1.0 + np.exp(diff)))
     elif mode == "gt":
@@ -63,44 +80,77 @@ def compute_score(reward_inputs: List[Dict[str, Any]], format_weight: float = 0.
     scores = []
 
     for reward_input in reward_inputs:
-        response = re.sub(r"\s*(<|>|/)\s*", r"\1", reward_input["response"])  # 清理格式
-        format_score = format_reward(response)
-        accuracy_score = reward_input.get("accuracy") or accuracy_reward(response, reward_input["ground_truth"])
-        difficulty = reward_input.get("difficulty", "easy")
 
-        gen_token_num = reward_input.get("high_entropy_token_num", 1)
-        target_token_num = reward_input.get("target_high_entropy_token_num", 1)
+        response = re.sub(r"\s*(<|>|/)\s*", r"\1", reward_input["response"])
+        format_score   = format_reward(response)
+        accuracy_score = reward_input.get("accuracy") or accuracy_reward(response, reward_input["ground_truth"])
+        difficulty     = reward_input.get("difficulty", "easy")
+
+        gen_token_num    = float(reward_input.get("high_entropy_token_num", 1))
+        target_token_num = float(reward_input.get("target_high_entropy_token_num", 1))
+        alpha_entropy_sample = float(reward_input.get("alpha_entropy", alpha_entropy))
+        # New: soft reasoning cost (continuous) with per-bucket lambda (dual ascent)
+        lambda_entropy = float(reward_input.get("lambda_entropy", 0.0))
+        soft_cost = float(reward_input.get("reasoning_soft_cost", 0.0))
+
+
+          
+        MARGIN_FRAC = {"easy": 0.15, "medium": 0.25, "hard": 0.35} 
+        KAPPA       = {"easy": 2.0,  "medium": 3.0,   "hard": 4.0}  
+        TEMP        = {"easy": 2.0,  "medium": 2.5,   "hard": 3.0}  
+        CAP_SCALE   = {"easy": 1.0,  "medium": 1.0,   "hard": 1.2}
+
+
+        delta   = gen_token_num - target_token_num
+        margin  = _margin_from_target(target_token_num, MARGIN_FRAC.get(difficulty, 0.2), min_margin=1.0)
+        kappa   = KAPPA.get(difficulty, 2.0)
+        temp    = TEMP.get(difficulty, 2.0)
+        cap     = alpha_entropy_sample * CAP_SCALE.get(difficulty, 1.0)
 
         entropy_score = 0.0
 
-        if difficulty in ["easy", "medium"]:
-            if accuracy_score == 1.0:
-                entropy_score = smooth_entropy_score(
-                    gen=gen_token_num,
-                    target=target_token_num,
-                    mode="lt",
-                    scale=alpha_entropy
-                )
+        # If lambda and soft_cost exist, prioritize constrained formulation
+        if (reward_input.get("lambda_entropy") is not None) and (reward_input.get("reasoning_soft_cost") is not None):
+            entropy_score = - lambda_entropy * soft_cost
+        else:
+            if difficulty in ("easy", "medium"):
+                if accuracy_score == 1.0:
+                    if difficulty == "easy":
+                        over = max(delta - margin, 0.0)                     
+                        pen  = _huber_penalty(over, kappa)
+                        entropy_score = -min(cap, pen / (margin + kappa) * cap)
+                    else:  # medium
+                        dev  = max(abs(delta) - margin, 0.0)                
+                        pen  = _huber_penalty(dev, kappa)
+                        entropy_score = -min(cap, pen / (margin + kappa) * cap)
+                else:
+                    lack = max((target_token_num - gen_token_num) - margin, 0.0)
+                    gain = _sigmoid_saturate(lack, temp) * cap * (0.6 if difficulty == "easy" else 0.8)
+                    entropy_score = gain
 
-        if difficulty == "hard":
-            if accuracy_score == 1.0:
-                entropy_score = alpha_entropy
-            elif accuracy_score == 0.0:
-                entropy_score = -smooth_entropy_score(
-                    gen=gen_token_num,
-                    target=target_token_num,
-                    mode="lt",
-                    scale=alpha_entropy
-                )
-        overall_score = accuracy_score + entropy_score
-        # 可选开启格式奖励
+            elif difficulty == "hard":
+                if accuracy_score == 1.0:
+
+                    if delta >= -margin:
+                        bonus = _sigmoid_saturate(delta - (-margin), temp) * cap 
+                        entropy_score = bonus
+                    else:
+                        pen = _huber_penalty((-delta) - margin, kappa)
+                        entropy_score = -min(cap, 0.5 * pen / (margin + kappa) * cap)
+                else:
+
+                    lack = max((target_token_num - gen_token_num) - margin, 0.0)
+                    gain = _sigmoid_saturate(lack, temp) * cap
+                    entropy_score = gain
+
+        overall_score = float(accuracy_score) + float(entropy_score)
         # overall_score += format_score * format_weight
 
         scores.append({
             "overall": overall_score,
-            "accuracy": accuracy_score,
-            "format": format_score,
-            "high_entropy_token_num_score": entropy_score,
+            "accuracy": float(accuracy_score),
+            "format": float(format_score),
+            "high_entropy_token_num_score": float(entropy_score),
         })
 
     return scores
