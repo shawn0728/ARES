@@ -28,6 +28,7 @@ from transformers.modeling_flash_attention_utils import index_first_axis, pad_in
 
 from ...protocol import DataProto
 from ...trainer.core_algos import average_loss, compute_kl, compute_policy_loss
+import numpy as np
 from ...utils import torch_functional as VF
 from ...utils.py_functional import append_to_dict
 from ...utils.ulysses import gather_outputs_and_unpad, ulysses_pad_and_slice_inputs
@@ -56,6 +57,71 @@ class DataParallelPPOActor(BasePPOActor):
             self.log_probs_from_logits = torch.compile(VF.log_probs_from_logits, dynamic=True)
         else:
             self.log_probs_from_logits = VF.log_probs_from_logits
+
+        # Adaptive KL (per difficulty bucket) following PPO target-KL heuristic
+        def _get(name: str, default):
+            return getattr(self.config, name, default)
+
+        dtarg_default = _get("kl_target_default", 0.01)
+        beta_init = _get("kl_beta_init", 1.0)
+        self._kl_state = {
+            "easy": {"beta": beta_init, "dtarg": _get("kl_target_easy", dtarg_default), "last_kl": None},
+            "medium": {"beta": beta_init, "dtarg": _get("kl_target_medium", dtarg_default), "last_kl": None},
+            "hard": {"beta": beta_init, "dtarg": _get("kl_target_hard", dtarg_default), "last_kl": None},
+        }
+        # New: smoother log-space update controls
+        self._kl_tol = _get("kl_update_tol", 1.5)
+        self._beta_min = _get("kl_beta_min", 1e-4)
+        self._beta_max = _get("kl_beta_max", 1e2)
+        self._ema_decay = _get("kl_ema_decay", 0.97)
+        self._kl_lr = _get("kl_beta_lr", 0.05)  # step in log-space
+        self._kl_clip = _get("kl_beta_clip", 0.2)  # |delta| cap per update in error domain
+        self._kl_update_interval = _get("kl_update_interval", 100)
+        self._kl_deadzone = _get("kl_deadzone", 0.02)  # small error not updated
+        # track EMA of error per bucket and update counters
+        self._e_ema = {"easy": 0.0, "medium": 0.0, "hard": 0.0}
+        self._update_count = 0
+
+    def _beta_for_levels(self, difficulty_levels, device):
+        # map per-sample difficulty -> current beta
+        betas = [self._kl_state.get(str(level), self._kl_state["medium"]).get("beta", 1.0) for level in difficulty_levels]
+        return torch.tensor(betas, device=device, dtype=torch.float32).unsqueeze(-1)
+
+    def _update_beta_per_bucket(self, difficulties, seq_mean_kl: torch.Tensor):
+        # group per-bucket mean KL, then apply smoother log-space update
+        self._update_count += 1
+        bucket_values: Dict[str, list] = {"easy": [], "medium": [], "hard": []}
+        for diff, val in zip(difficulties, seq_mean_kl.detach().cpu().tolist()):
+            key = str(diff)
+            if key in bucket_values:
+                bucket_values[key].append(val)
+        for diff, vals in bucket_values.items():
+            if not vals:
+                continue
+            cur = float(sum(vals) / len(vals))
+            st = self._kl_state[diff]
+            last = st.get("last_kl")
+            if last is None:
+                last = cur
+            mean_kl = (1.0 - self._ema_decay) * cur + self._ema_decay * last
+            st["last_kl"] = mean_kl
+            # error signal vs target (within tolerance band)
+            target = max(1e-8, st["dtarg"])  # avoid zero
+            e = (mean_kl / target) - 1.0
+            # deadzone
+            if abs(e) < self._kl_deadzone:
+                continue
+            # only update at intervals
+            if (self._update_count % self._kl_update_interval) != 0:
+                continue
+            # EMA over error then capped small step in log-space
+            self._e_ema[diff] = (1.0 - self._ema_decay) * e + self._ema_decay * self._e_ema[diff]
+            de = float(np.clip(self._e_ema[diff], -self._kl_clip, self._kl_clip))
+            # update log(beta)
+            cur_beta = max(self._beta_min, min(self._beta_max, st["beta"]))
+            logb = float(np.log(cur_beta))
+            logb_new = np.clip(logb + self._kl_lr * de, np.log(self._beta_min), np.log(self._beta_max))
+            st["beta"] = float(np.exp(logb_new))
 
     def _forward_micro_batch(self, micro_batch: Dict[str, torch.Tensor], temperature: float) -> torch.Tensor:
         """
@@ -153,6 +219,7 @@ class DataParallelPPOActor(BasePPOActor):
 
         return log_probs
 
+
     def _optimizer_step(self) -> torch.Tensor:
         if isinstance(self.actor_module, FSDP):
             grad_norm = self.actor_module.clip_grad_norm_(self.config.max_grad_norm)
@@ -213,7 +280,7 @@ class DataParallelPPOActor(BasePPOActor):
         temperature = data.meta_info["temperature"]  # temperature must be in the data.meta_info to avoid slient error
         select_keys = ["responses", "input_ids", "attention_mask", "position_ids"]
         select_keys.extend(["old_log_probs", "ref_log_probs", "advantages"])
-        non_tensor_select_keys = ["multi_modal_inputs"]
+        non_tensor_select_keys = ["multi_modal_inputs", "difficulty"]
 
         # Split to make minibatch iterator for updating the actor
         # See PPO paper for details. https://arxiv.org/abs/1707.06347
@@ -256,12 +323,53 @@ class DataParallelPPOActor(BasePPOActor):
                     )
                     if self.config.use_kl_loss and "ref_log_probs" in model_inputs:
                         ref_log_probs = model_inputs["ref_log_probs"]
-                        # compute kl loss
-                        kld = compute_kl(
+
+                        # Base KL per token (unscaled), then adaptive per-difficulty beta
+                        kld_base = compute_kl(
                             log_probs=log_probs,
                             ref_log_probs=ref_log_probs,
                             kl_penalty=self.config.kl_penalty,
-                        )
+                        )  # (bsz, response_length)
+
+                        if getattr(self.config, "dynamic_kl_loss", True) and ("difficulty" in model_inputs):
+                            difficulty_levels = model_inputs["difficulty"]
+                            # compute per-seq mean KL for beta update (mask-aware)
+                            with torch.no_grad():
+                                mask = response_mask.float()
+                                valid = torch.clamp(mask.sum(dim=1), min=1.0)
+                                seq_mean_kl = (kld_base * mask).sum(dim=1) / valid
+                                self._update_beta_per_bucket(difficulty_levels, seq_mean_kl)
+                            beta_per_seq = self._beta_for_levels(difficulty_levels, device=kld_base.device)
+                            kld = kld_base * beta_per_seq
+                        else:
+                            kld = kld_base
+
+                        # --- Second-chance KL relaxation (local, per-sample) ---
+                        if getattr(self.config, "enable_second_chance_kl", True):
+                            try:
+                                # optional signals
+                                difficulties = model_inputs.get("difficulty", None)
+                                accuracies = model_inputs.get("accuracy", None)
+                                soft_costs = model_inputs.get("reasoning_soft_cost", None)
+                                relax_vec = torch.ones((kld.shape[0], 1), device=kld.device, dtype=kld.dtype)
+                                if soft_costs is not None:
+                                    # build mask: (easy-only?) & (incorrect-only?) & (soft_cost high)
+                                    soft_cost_t = torch.tensor(soft_costs, device=kld.device, dtype=kld.dtype).view(-1, 1)
+                                    mask = (soft_cost_t >= self.config.second_chance_soft_cost_min)
+                                    if difficulties is not None and getattr(self.config, "second_chance_easy_only", True):
+                                        diff_mask = torch.tensor([1.0 if str(d)=="easy" else 0.0 for d in difficulties], device=kld.device, dtype=kld.dtype).view(-1,1)
+                                        mask = mask & (diff_mask > 0.5)
+                                    if accuracies is not None and getattr(self.config, "second_chance_incorrect_only", True):
+                                        acc_t = torch.tensor(accuracies, device=kld.device, dtype=kld.dtype).view(-1,1)
+                                        mask = mask & (acc_t < 0.5)
+                                    # apply per-sample scale
+                                    scale = self.config.second_chance_kl_relax
+                                    relax_vec = torch.where(mask, torch.full_like(relax_vec, float(scale)), relax_vec)
+                                # multiply tokenwise KL by per-sample factor
+                                kld = kld * relax_vec
+                            except Exception:
+                                pass
+
                         kl_loss = average_loss(kld, response_mask, mode=self.config.loss_avg_mode)
                         pg_loss = pg_loss + kl_loss * self.config.kl_coef
                         metrics["actor/kl_loss"] = kl_loss.detach().item()
@@ -283,3 +391,21 @@ class DataParallelPPOActor(BasePPOActor):
                 append_to_dict(metrics, {"actor/grad_norm": grad_norm.detach().item()})
 
         return metrics
+
+    def _get_difficulty_coefficient(self, difficulty_levels):
+        """根据难度级别返回系数"""
+        difficulty_coefficients = {
+            'easy': 1.25,    # 简单题 KL 惩罚更重，强制对齐 reference，少瞎编
+            'medium': 1.0,  # 中等题维持中性惩罚
+            'hard': 0.75     # 困难题 KL 惩罚更轻，鼓励发散探索
+        }
+        device = next(self.actor_module.parameters()).device
+        # 将难度级别转换为系数
+        coef_tensor = torch.tensor([
+            difficulty_coefficients.get(level, 1.0) 
+            for level in difficulty_levels
+        ], device=device)
+        
+        return coef_tensor.unsqueeze(-1)  # 扩展到token维度
+
+

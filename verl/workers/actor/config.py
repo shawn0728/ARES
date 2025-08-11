@@ -99,6 +99,16 @@ class ActorConfig:
     ulysses_size: int = 1
     """ulysses sequence parallel size"""
     use_torch_compile: bool = True
+    dynamic_kl_loss: bool = False
+    """enable dynamic kl loss based on difficulty levels"""
+    # Second-chance KL relaxation for stuck easy samples (conditional local relaxation)
+    enable_second_chance_kl: bool = True
+    second_chance_easy_only: bool = True
+    second_chance_incorrect_only: bool = True
+    second_chance_soft_cost_min: float = 0.5
+    """minimum reasoning_soft_cost to trigger per-sample KL relaxation"""
+    second_chance_kl_relax: float = 0.67
+    """multiply per-sample KL by this factor (<=1) when second chance triggers"""
     model: ModelConfig = field(default_factory=ModelConfig)
     optim: OptimConfig = field(default_factory=OptimConfig)
     fsdp: FSDPConfig = field(default_factory=FSDPConfig)

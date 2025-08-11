@@ -21,7 +21,7 @@ implement PPO
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from enum import Enum
-from typing import TYPE_CHECKING, Dict, Literal, Tuple
+from typing import TYPE_CHECKING, Dict, List, Literal, Tuple
 
 import numpy as np
 import torch
@@ -61,6 +61,31 @@ class AdaptiveKLController(KLController):
         self.kl_coef *= mult
 
 
+class TokenLevelAdaptiveKLController(KLController):
+    """Adaptive KL controller described in: https://arxiv.org/pdf/1909.08593.pdf
+
+    Copied from https://github.com/huggingface/trl/blob/v0.11.0/trl/trainer/utils.py#L54"""
+
+    def __init__(self, init_kl_coefs: Dict[str, float], 
+                 target_kls: Dict[str, float], 
+                 horizon: float):
+        self.kl_coefs = init_kl_coefs  # {"easy": 0.002, "medium": 0.001, "hard": 0.0005}
+        self.targets = target_kls       # {"easy": 0.05, "medium": 0.1, "hard": 0.2}
+        self.horizon = horizon
+        self.lambdas = {k: 1.0 for k in init_kl_coefs.keys()}  # 拉格朗日乘子
+    
+    def update(self, current_kls: Dict[str, float], n_steps: Dict[str, int]):
+        """对每个桶分别更新"""
+        for bucket in self.kl_coefs.keys():
+            if bucket in current_kls:
+                # Dual ascent: λ_d ← [λ_d + η_λ * (D_KL^(d) - ε_d)]_+
+                kl_error = current_kls[bucket] - self.targets[bucket]
+                self.lambdas[bucket] = max(0, self.lambdas[bucket] + 0.01 * kl_error)
+                
+                # 更新 KL 系数
+                self.kl_coefs[bucket] = self.lambdas[bucket] * self.kl_coefs[bucket]
+
+
 class FixedKLController(KLController):
     """Fixed KL controller.
 
@@ -92,6 +117,13 @@ def get_kl_controller(algorithm_config: "AlgorithmConfig") -> KLController:
     elif algorithm_config.kl_type == "adaptive":
         assert algorithm_config.kl_horizon > 0, f"horizon must be larger than 0. Got {algorithm_config.kl_horizon}."
         kl_ctrl = AdaptiveKLController(
+            init_kl_coef=algorithm_config.kl_coef,
+            target_kl=algorithm_config.kl_target,
+            horizon=algorithm_config.kl_horizon,
+        )
+    elif algorithm_config.kl_type == "token_adaptive":
+        assert algorithm_config.kl_horizon > 0, f"horizon must be larger than 0. Got {algorithm_config.kl_horizon}."
+        kl_ctrl = TokenLevelAdaptiveKLController(
             init_kl_coef=algorithm_config.kl_coef,
             target_kl=algorithm_config.kl_target,
             horizon=algorithm_config.kl_horizon,

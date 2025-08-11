@@ -77,8 +77,13 @@ def compute_entropy_from_logprobs(logprobs_per_token_list: List[List[Dict[int, A
         token_entropies = []
         for logprob_dict in logprobs_per_token:
             log_probs = np.array([logprob.logprob for logprob in logprob_dict.values()], dtype=np.float32)
-            probs = np.exp(log_probs)
-            entropy = -np.sum(probs * log_probs)
+            # Tail-mass corrected entropy using raw (truncated) probs + a tail bucket
+            raw_probs = np.exp(log_probs)
+            sum_raw = float(np.sum(raw_probs))
+            tail = max(0.0, 1.0 - sum_raw)
+            entropy = -float(np.sum(raw_probs * log_probs))
+            if tail > 0.0:
+                entropy -= float(tail * np.log(max(tail, 1e-12)))
             token_entropies.append(entropy)
         mean_entropy = np.mean(token_entropies) if token_entropies else 0.0
         entropy_list.append(float(mean_entropy))
@@ -90,8 +95,12 @@ def collect_global_token_entropy_from_logprobs(logprobs_per_token_list: List[Lis
         token_entropies = []
         for logprob_dict in logprobs_per_token:
             log_probs = np.array([logprob.logprob for logprob in logprob_dict.values()], dtype=np.float32)
-            probs = np.exp(log_probs)
-            entropy = -np.sum(probs * log_probs)
+            raw_probs = np.exp(log_probs)
+            sum_raw = float(np.sum(raw_probs))
+            tail = max(0.0, 1.0 - sum_raw)
+            entropy = -float(np.sum(raw_probs * log_probs))
+            if tail > 0.0:
+                entropy -= float(tail * np.log(max(tail, 1e-12)))
             token_entropies.append(entropy)
         all_token_entropies_list.extend(token_entropies)
     return all_token_entropies_list
@@ -108,8 +117,12 @@ def compute_high_entropy_token_num_from_logprobs_dynamic(logprobs_per_token_list
     for logprobs_per_token in logprobs_per_token_list:
         for logprob_dict in logprobs_per_token:
             log_probs = np.array([logprob.logprob for logprob in logprob_dict.values()], dtype=np.float32)
-            probs = np.exp(log_probs)
-            entropy = -np.sum(probs * log_probs)
+            raw_probs = np.exp(log_probs)
+            sum_raw = float(np.sum(raw_probs))
+            tail = max(0.0, 1.0 - sum_raw)
+            entropy = -float(np.sum(raw_probs * log_probs))
+            if tail > 0.0:
+                entropy -= float(tail * np.log(max(tail, 1e-12)))
             all_token_entropies.append(entropy)
 
     threshold = compute_high_entropy_threshold(all_token_entropies, percentile)
@@ -117,12 +130,17 @@ def compute_high_entropy_token_num_from_logprobs_dynamic(logprobs_per_token_list
     # 再统计每个 sample 的高熵 token 数
     high_entropy_token_num_list = []
     for logprobs_per_token in logprobs_per_token_list:
-        count = sum(
-            -np.sum(np.exp(np.array([logprob.logprob for logprob in logprob_dict.values()])) * 
-                    np.array([logprob.logprob for logprob in logprob_dict.values()]))
-            > threshold
-            for logprob_dict in logprobs_per_token
-        )
+        count = 0
+        for logprob_dict in logprobs_per_token:
+            log_probs = np.array([logprob.logprob for logprob in logprob_dict.values()], dtype=np.float32)
+            raw_probs = np.exp(log_probs)
+            sum_raw = float(np.sum(raw_probs))
+            tail = max(0.0, 1.0 - sum_raw)
+            entropy = -float(np.sum(raw_probs * log_probs))
+            if tail > 0.0:
+                entropy -= float(tail * np.log(max(tail, 1e-12)))
+            if entropy > threshold:
+                count += 1
         high_entropy_token_num_list.append(count)
 
     return high_entropy_token_num_list, threshold
@@ -195,15 +213,22 @@ def compute_reasoning_token_window_entropy(
     """
     valid_high_entropy_token_num_list = []
     invalid_high_entropy_token_num_list = []
+    soft_cost_sum_list = []
+    
     for logprobs_per_token in logprobs_per_token_list:
         valid_high_entropy_token_num = 0
         invalid_high_entropy_token_num = 0
+        soft_cost_sum = 0.0
         token_entropies = []
         token_ids = []
         for logprob_dict in logprobs_per_token:
             log_probs = np.array([logprob.logprob for logprob in logprob_dict.values()], dtype=np.float32)
-            probs = np.exp(log_probs)
-            entropy = -np.sum(probs * log_probs)
+            raw_probs = np.exp(log_probs)
+            sum_raw = float(np.sum(raw_probs))
+            tail = max(0.0, 1.0 - sum_raw)
+            entropy = -float(np.sum(raw_probs * log_probs))
+            if tail > 0.0:
+                entropy -= float(tail * np.log(max(tail, 1e-12)))
             token_entropies.append(entropy)
             top_token_id = max(logprob_dict.items(), key=lambda x: x[1].logprob)[0]
             token_ids.append(top_token_id)
@@ -212,20 +237,99 @@ def compute_reasoning_token_window_entropy(
 
         for i, tok in enumerate(token_strs):
             if tok in reasoning_token_set:
-                next_window = token_entropies[i : min(i + window_size, len(token_entropies))]
-                if next_window:
+                # 检查是否有足够的后续 token 来形成完整的窗口
+                remaining_length = len(token_entropies) - i - 1
+                if remaining_length >= window_size:
+                    next_window = token_entropies[i + 1 : i + 1 + window_size]
                     mean_following_entropy = float(np.mean(next_window))
+                    # 连续软成本：越高越贵
+                    soft_cost = max(0.0, mean_following_entropy - threshold)
+                    soft_cost_sum += soft_cost
                     if mean_following_entropy >= threshold:
                         valid_high_entropy_token_num += 1
                     else:
                         invalid_high_entropy_token_num += 1
         valid_high_entropy_token_num_list.append(valid_high_entropy_token_num)
         invalid_high_entropy_token_num_list.append(invalid_high_entropy_token_num)
+        soft_cost_sum_list.append(float(soft_cost_sum))
 
         # result.append(sample_result)
-    return valid_high_entropy_token_num_list, invalid_high_entropy_token_num_list
+    return valid_high_entropy_token_num_list, invalid_high_entropy_token_num_list, soft_cost_sum_list
+
+def get_percentile_threshold_list(logprobs_per_token_list: List[List[Dict[int, Any]]],percentile: float = 99.0) -> List[float]:
+    # get 99 percentile threshold for each sample and return a list
+    percentile_threshold_list = []
+    for logprobs_per_token in logprobs_per_token_list:
+        token_entropies = []
+        for logprob_dict in logprobs_per_token:  # limit token count if needed
+            log_probs = np.array([logprob.logprob for logprob in logprob_dict.values()], dtype=np.float32)
+            raw_probs = np.exp(log_probs)
+            sum_raw = float(np.sum(raw_probs))
+            tail = max(0.0, 1.0 - sum_raw)
+            entropy = -float(np.sum(raw_probs * log_probs))
+            if tail > 0.0:
+                entropy -= float(tail * np.log(max(tail, 1e-12)))
+            token_entropies.append(entropy)
+        if token_entropies:  # avoid crash on empty list
+            sample_percentile = np.percentile(token_entropies, percentile)
+        else:
+            sample_percentile = 0.0  # or np.nan if you prefer signaling missing data
+        percentile_threshold_list.append(sample_percentile)
+
+    return percentile_threshold_list
 
 
+def get_window_average_entropy_percentile_threshold_list(
+    logprobs_per_token_list: List[List[Dict[int, Any]]], 
+    percentile: float = 98.0, 
+    window_size: int = 8
+) -> List[float]:
+    """
+    计算基于窗口平均熵的 percentile threshold
+    1. 对每个 token，计算后续 window_size 个 token 的平均熵
+    2. 收集所有窗口平均熵，计算 percentile
+    3. 只有当剩余 token 数量足够时才计算窗口平均熵
+    """
+    percentile_threshold_list = []
+    
+    for sample_idx, logprobs_per_token in enumerate(logprobs_per_token_list):
+        window_average_entropies = []
+        
+        # 计算每个 token 的熵
+        token_entropies = []
+        for logprob_dict in logprobs_per_token:
+            log_probs = np.array([logprob.logprob for logprob in logprob_dict.values()], dtype=np.float32)
+            probs = np.exp(log_probs)
+            entropy = -np.sum(probs * log_probs)
+            token_entropies.append(entropy)
+        
+        # 对每个 token，计算后续窗口的平均熵
+        for i in range(len(token_entropies)):
+            # 检查是否有足够的后续 token 来形成完整的窗口
+            remaining_length = len(token_entropies) - i - 1
+            if remaining_length >= window_size:
+                next_window = token_entropies[i + 1 : i + 1 + window_size]
+                mean_window_entropy = float(np.mean(next_window))
+                window_average_entropies.append(mean_window_entropy)
+            else:
+                # 剩余长度不足，添加之前的平均值以保持 batch 长度一致
+                if window_average_entropies:
+                    window_average_entropies.append(np.mean(window_average_entropies))
+                else:
+                    # 如果还没有任何窗口平均值，使用当前 token 的熵
+                    window_average_entropies.append(token_entropies[i])
+        
+        # 计算窗口平均熵的 percentile
+        if window_average_entropies:
+            sample_percentile = np.percentile(window_average_entropies, percentile)
+            print(f"[Debug] Sample {sample_idx}: window_average_entropies count={len(window_average_entropies)}, {percentile}th percentile={sample_percentile:.4f}")
+        else:
+            sample_percentile = 0.0
+            print(f"[Debug] Sample {sample_idx}: No window average entropies found")
+        
+        percentile_threshold_list.append(sample_percentile)
+    
+    return percentile_threshold_list
 
 def load_reasoning_token_set(json_path = "/cpfs/user/yym/projects/Adaptive-VL-worktrees/exp_crucial_token_entropy/crucial_token_list/crucial_token_final_version_0731.json"):
     with open(json_path, "r", encoding="utf-8") as f:
@@ -242,8 +346,12 @@ def get_percentile_threshold_list(logprobs_per_token_list: List[List[Dict[int, A
         token_entropies = []
         for logprob_dict in logprobs_per_token:  # limit token count if needed
             log_probs = np.array([logprob.logprob for logprob in logprob_dict.values()], dtype=np.float32)
-            probs = np.exp(log_probs)
-            entropy = -np.sum(probs * log_probs)
+            raw_probs = np.exp(log_probs)
+            sum_raw = float(np.sum(raw_probs))
+            tail = max(0.0, 1.0 - sum_raw)
+            entropy = -float(np.sum(raw_probs * log_probs))
+            if tail > 0.0:
+                entropy -= float(tail * np.log(max(tail, 1e-12)))
             token_entropies.append(entropy)
         if token_entropies:  # avoid crash on empty list
             sample_percentile = np.percentile(token_entropies, percentile)
@@ -352,6 +460,7 @@ class vLLMRollout(BaseRollout):
         non_tensor_batch = prompts.non_tensor_batch
         batch_raw_prompt_ids = non_tensor_batch.pop("raw_prompt_ids")
         batch_multi_modal_data = non_tensor_batch.pop("multi_modal_data", None)
+        window_size = 4
         if batch_size != len(batch_raw_prompt_ids):
             raise RuntimeError("vllm sharding manager is not work properly.")
 
@@ -384,27 +493,27 @@ class vLLMRollout(BaseRollout):
                 for output in completion.outputs:
                     logprobs_per_token = output.logprobs  # list of dict
                     logprobs_per_token_list.append(logprobs_per_token)
-
+            
             entropy_list = compute_entropy_from_logprobs(logprobs_per_token_list)
             # tokenwise_entropy_list = collect_global_token_entropy_from_logprobs(logprobs_per_token_list)
-            percentile_threshold_list = get_percentile_threshold_list(logprobs_per_token_list, percentile=95.0)
+            # 使用基于窗口平均熵的 percentile 计算
+            percentile_threshold_list = get_window_average_entropy_percentile_threshold_list(
+                logprobs_per_token_list, 
+                percentile=95.0, 
+                window_size=window_size
+            )
             # import ipdb;ipdb.set_trace()
             reasoning_token_set = load_reasoning_token_set("/cpfs/user/yym/projects/Adaptive-VL-worktrees/exp_crucial_token_entropy/crucial_token_list/crucial_token_final_version_0731.json")
-            # high_entropy_token_num_list = compute_high_entropy_token_num_from_logprobs(logprobs_per_token_list, threshold=high_entropy_threshold)
-            # high_entropy_token_num_list = compute_high_entropy_token_num_from_logprobs(
-            #     logprobs_per_token_list,
-            #     tokenizer=self.tokenizer,
-            #     threshold=high_entropy_threshold,
-            #     reasoning_token_set=reasoning_token_set
-            # )
-            valid_trigger_count_list, invalid_trigger_count_list = compute_reasoning_token_window_entropy(
+            
+            valid_trigger_count_list, invalid_trigger_count_list, soft_cost_sum_list = compute_reasoning_token_window_entropy(
                 logprobs_per_token_list,
                 tokenizer=self.tokenizer,
                 threshold=high_entropy_threshold,
                 reasoning_token_set=reasoning_token_set,
-                window_size=16
+                window_size=window_size
             )
             high_entropy_token_num_list = valid_trigger_count_list
+            # print("[Debug] Calculated high entropy token num list:", high_entropy_token_num_list)
             print("[Debug] Calculated high entropy threshold:", high_entropy_threshold)
 
             response_ids = [output.token_ids for completion in completions for output in completion.outputs]
@@ -454,13 +563,15 @@ class vLLMRollout(BaseRollout):
                                 "entropies": entropy_list,
                                 "high_entropy_token_num": high_entropy_token_num_list,
                                 "invalid_reasoning_trigger_list": invalid_trigger_count_list,
-                                "percentile_thresholds": percentile_threshold_list,
+                                "entropy_percentile_thresholds": percentile_threshold_list,
+                                "reasoning_soft_cost": soft_cost_sum_list,
                                 }
         else:
             non_tensor_batch = {"entropies": entropy_list,
                                 "high_entropy_token_num": high_entropy_token_num_list,
                                 "invalid_reasoning_trigger_list": invalid_trigger_count_list,
-                                "percentile_thresholds": percentile_threshold_list,
+                                "entropy_percentile_thresholds": percentile_threshold_list,
+                                "reasoning_soft_cost": soft_cost_sum_list,
                                 }
             
 

@@ -88,12 +88,14 @@ class AlgorithmConfig:
     """kl penalty type, support `kl`, `abs`, `mse`, `low_var_kl`, `full`"""
     kl_coef: float = 1e-3
     """kl coefficient"""
-    kl_type: str = "fixed"
-    """kl controller type, support `fixed`, `adaptive`"""
+    kl_type: str = "adaptive"
+    """kl controller type, support `fixed`, `adaptive`, `token_adaptive`"""
     kl_horizon: float = 10000.0
     """kl horizon for adaptive kl controller"""
     kl_target: float = 0.1
     """target kl for adaptive kl controller"""
+    difficulty_aware_kl_penalty: bool = True
+    """use difficulty-aware KL penalty with different coefficients for different difficulty levels"""
     online_filtering: bool = False
     """use online filtering"""
     filter_key: str = "overall"

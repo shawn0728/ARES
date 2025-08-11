@@ -98,7 +98,7 @@ class RayResourcePool(ResourcePool):
         # print(f"pg_name_prefix = {pg_name_prefix}")
         pg_scheme = [
             [
-                {"CPU": self.max_colocate_count, "GPU": 1} if self.use_gpu else {"CPU": self.max_colocate_count}
+                {"CPU": self.max_colocate_count*8, "GPU": 1} if self.use_gpu else {"CPU": self.max_colocate_count*8}
                 for _ in range(process_count)
             ]
             for process_count in self._store

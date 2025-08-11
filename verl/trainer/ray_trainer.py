@@ -103,6 +103,37 @@ class ResourcePoolManager:
         if gpus_available < gpus_required:
             raise ValueError(f"Total available GPUs {gpus_available} is less than total desired GPUs {gpus_required}.")
 
+def apply_difficulty_aware_kl_penalty(data: DataProto, kl_ctrl: KLController, kl_penalty="kl"):
+    token_level_scores = data.batch["token_level_scores"]
+    batch_size = data.batch.batch_size[0]
+    response_mask = data.batch["response_mask"]
+    
+    # 获取难度信息
+    difficulty_list = data.non_tensor_batch.get("difficulty", ["medium"] * batch_size)
+    difficulty_kl_coef_dict = {
+        "easy": 2.0,    
+        "medium": 1.0,  
+        "hard": 0.5,    
+    }
+    # 计算KL divergence
+    kld = compute_kl(data.batch["old_log_probs"], data.batch["ref_log_probs"], kl_penalty=kl_penalty)
+    kld = kld * response_mask
+    
+    # 应用基于难度的KL penalty
+    token_level_rewards = token_level_scores.clone()
+    for i, difficulty in enumerate(difficulty_list):
+        kl_coef = kl_ctrl.kl_coef * difficulty_kl_coef_dict[difficulty]
+        token_level_rewards[i] = token_level_scores[i] - kl_coef * kld[i]
+    
+    data.batch["token_level_rewards"] = token_level_rewards
+    
+    # 其余逻辑保持不变...
+    current_kl = VF.masked_mean(kld, mask=response_mask, dim=-1)
+    current_kl = torch.mean(current_kl, dim=0).item()
+    metrics = {"critic/kl": current_kl, "critic/kl_coef": kl_ctrl.kl_coef}
+    
+    kl_ctrl.update(current_kl=current_kl, n_steps=batch_size)
+    return data, metrics
 
 def apply_kl_penalty(data: DataProto, kl_ctrl: KLController, kl_penalty="kl"):
     token_level_scores = data.batch["token_level_scores"]
@@ -194,6 +225,17 @@ class RayPPOTrainer:
         self.difficulty_dict_train = {}
         self.target_length_dict = {}
         self.target_high_entropy_token_num_dict = {}
+        # Adaptive entropy shaping alpha per difficulty
+        def _get_conf(name, default):
+            return getattr(self.config, name, default)
+        self.alpha_entropy_lr = _get_conf("alpha_entropy_lr", 0.05)
+        self.alpha_entropy_min = _get_conf("alpha_entropy_min", 0.0)
+        self.alpha_entropy_max = _get_conf("alpha_entropy_max", 2.0)
+        self.alpha_entropy_dict = {
+            "easy": _get_conf("alpha_entropy_init_easy", 0.5),
+            "medium": _get_conf("alpha_entropy_init_medium", 0.5),
+            "hard": _get_conf("alpha_entropy_init_hard", 0.5),
+        }
         self.skip_gid_set = set()
         self.bootstrap_train_dataloader = bootstrap_train_dataloder
         self.bootstrap_val_dataloader = bootstrap_val_dataloader
@@ -422,7 +464,7 @@ class RayPPOTrainer:
         reward_metrics_lst = defaultdict(list)
         uid2rollouts = defaultdict(list)
         print("Start validation...")
-        all_token_entropy_list = []
+        # all_token_entropy_list = []
         self.actor_rollout_ref_wg.prepare_rollout_engine()
         for batch_dict in self.val_dataloader:
             test_batch = DataProto.from_single_dict(batch_dict)
@@ -453,9 +495,9 @@ class RayPPOTrainer:
             lengths = test_batch.batch["response_mask"].sum(dim=-1).cpu().tolist()
             global_ids = test_batch.non_tensor_batch["global_id"]
             entropies = test_batch.non_tensor_batch["entropies"]
-            tokenwise_entropy_list = test_batch.non_tensor_batch["tokenwise_entropy_threshold"].tolist()
+            # tokenwise_entropy_list = test_batch.non_tensor_batch["tokenwise_entropy_threshold"].tolist()
             high_entropy_token_num = test_batch.non_tensor_batch["high_entropy_token_num"]
-            all_token_entropy_list.extend(tokenwise_entropy_list)
+            # all_token_entropy_list.extend(tokenwise_entropy_list)
 
             for gid, acc, entropy,high_ety_token_num, length in zip(global_ids, accuracies,entropies,high_entropy_token_num, lengths):
                 uid2rollouts[gid].append({'length': length,'entropy':entropy, "high_ety_token_num":high_ety_token_num,'is_correct': acc > 0.5})
@@ -477,7 +519,7 @@ class RayPPOTrainer:
         self.actor_rollout_ref_wg.release_rollout_engine()
         # 聚合 accuracy，判定 difficulty，如果 high_entropy_token_threshold 未设置(初始validation），则使用所有 token 的平均 entropy
         if self.high_entropy_token_threshold < 0:
-            self.high_entropy_token_threshold = np.mean(all_token_entropy_list)
+            self.high_entropy_token_threshold = np.mean(test_batch.non_tensor_batch["entropy_percentile_thresholds"])
         difficulty_dict_val = {}
         difficulty_rollouts = defaultdict(list)
 
@@ -510,6 +552,7 @@ class RayPPOTrainer:
 
         for diff in ["easy", "medium", "hard"]:
             target_high_entropy_num_dict[diff] = int(min_entropy + difficulty_entropy_coef[diff] * (max_entropy - min_entropy))
+            print(f"[Debug] {diff}: {min_entropy} + {difficulty_entropy_coef[diff]} * ({max_entropy} - {min_entropy}) = {target_high_entropy_num_dict[diff]}")
 
         for diff in ["easy", "medium", "hard"]:
             rollouts = difficulty_rollouts[diff]
@@ -800,14 +843,20 @@ class RayPPOTrainer:
 
         for diff, values in difficulty_bucket.items():
             self.target_high_entropy_token_num_dict[diff] = round(difficulty_coefficient[diff] * np.mean(values))
-            
-        drop_ratio = 0.8
-        if difficulty_bucket["easy"]:
-            min_entropy = min(difficulty_bucket["easy"])
-            self.drop_allpass_entropy_threshold = min_entropy + drop_ratio * (
-                self.target_high_entropy_token_num_dict["easy"] - min_entropy
-            )
-        self.drop_allpass_entropy_threshold = min_entropy + drop_ratio * (self.target_high_entropy_token_num_dict['easy'] - min_entropy)
+
+        # Update alpha_entropy per bucket using deviation from target
+        for diff, values in difficulty_bucket.items():
+            if not values:
+                continue
+            mean_gen = float(np.mean(values))
+            target = float(self.target_high_entropy_token_num_dict.get(diff, mean_gen))
+            if diff in ("easy", "medium"):
+                delta = (mean_gen - target)  # too many -> increase penalty
+            else:  # hard
+                delta = (target - mean_gen)  # not enough -> increase encouragement
+            new_alpha = self.alpha_entropy_dict[diff] + self.alpha_entropy_lr * delta
+            new_alpha = float(np.clip(new_alpha, self.alpha_entropy_min, self.alpha_entropy_max))
+            self.alpha_entropy_dict[diff] = new_alpha
         print(f"[Train] Updated difficulty_dict, size={len(self.difficulty_dict_train)}")
 
     def fit(self):
@@ -897,11 +946,59 @@ class RayPPOTrainer:
 
                 # use training batch to determine the high_entropy_token_threshold
                 global_ids = batch.non_tensor_batch["global_id"]
-                self.high_entropy_token_threshold = np.mean(batch.non_tensor_batch["entropy_percentile_thresholds"])
+                batch_thresholds = batch.non_tensor_batch["entropy_percentile_thresholds"]
+                # Use robust statistic then EMA to stabilize threshold
+                batch_p95 = float(np.median(batch_thresholds))
+                if not hasattr(self, "_ema_entropy_threshold"):
+                    self._ema_entropy_threshold = batch_p95
+                else:
+                    self._ema_entropy_threshold = 0.99 * self._ema_entropy_threshold + 0.01 * batch_p95
+                self.high_entropy_token_threshold = float(self._ema_entropy_threshold)
                 self.update_difficulty_and_skip_gid_set(batch)
                 batch.non_tensor_batch["dynamic_token_length"] = [self.target_length_dict[self.difficulty_dict_train[gid]] for gid in global_ids]
                 batch.non_tensor_batch["difficulty"] = [self.difficulty_dict_train[gid] for gid in global_ids]
                 batch.non_tensor_batch["target_high_entropy_token_num"] = [self.target_high_entropy_token_num_dict[self.difficulty_dict_train[gid]] for gid in global_ids]
+                # inject per-sample alpha_entropy resolved from difficulty
+                batch.non_tensor_batch["alpha_entropy"] = [self.alpha_entropy_dict[self.difficulty_dict_train[gid]] for gid in global_ids]
+
+                # --- Dual-ascent lambda for reasoning cost (soft) ---
+                # Initialize per-difficulty lambda and cost budget if not exist
+                if not hasattr(self, "lambda_entropy_dict"):
+                    self.lambda_entropy_dict = {"easy": 0.0, "medium": 0.0, "hard": 0.0}
+                if not hasattr(self, "lambda_entropy_lr"):
+                    # small step to avoid oscillation
+                    self.lambda_entropy_lr = 0.01
+                if not hasattr(self, "lambda_entropy_max"):
+                    self.lambda_entropy_max = 10.0
+                if not hasattr(self, "cost_budget_dict"):
+                    # reuse target_high_entropy_token_num as budget proxy when soft cost is unavailable
+                    self.cost_budget_dict = {
+                        "easy": float(self.target_high_entropy_token_num_dict.get("easy", 1.0)),
+                        "medium": float(self.target_high_entropy_token_num_dict.get("medium", 1.0)),
+                        "hard": float(self.target_high_entropy_token_num_dict.get("hard", 1.0)),
+                    }
+
+                # Compute per-difficulty mean soft cost if available
+                soft_costs = batch.non_tensor_batch.get("reasoning_soft_cost", None)
+                if soft_costs is not None:
+                    gid2soft = {gid: float(sc) for gid, sc in zip(global_ids, soft_costs)}
+                    bucket_vals = {"easy": [], "medium": [], "hard": []}
+                    for gid in global_ids:
+                        diff = self.difficulty_dict_train[gid]
+                        if diff in bucket_vals:
+                            bucket_vals[diff].append(gid2soft.get(gid, 0.0))
+                    # update lambda via dual ascent per bucket
+                    for diff, vals in bucket_vals.items():
+                        if len(vals) < 8:
+                            continue  # avoid noise when few samples
+                        mean_cost = float(np.mean(vals))
+                        target_B = float(self.cost_budget_dict.get(diff, mean_cost))
+                        err = mean_cost - target_B
+                        new_lam = float(self.lambda_entropy_dict.get(diff, 0.0)) + self.lambda_entropy_lr * err
+                        new_lam = float(np.clip(new_lam, 0.0, self.lambda_entropy_max))
+                        self.lambda_entropy_dict[diff] = new_lam
+                # inject per-sample lambda to batch
+                batch.non_tensor_batch["lambda_entropy"] = [self.lambda_entropy_dict[self.difficulty_dict_train[gid]] for gid in global_ids]
 
 
                 # compute global valid tokens
@@ -940,7 +1037,12 @@ class RayPPOTrainer:
                     # apply kl penalty if available
                     if not self.config.algorithm.use_kl_loss and self.use_reference_policy:
                         # apply kl penalty to reward
-                        batch, kl_metrics = apply_kl_penalty(batch, self.kl_ctrl, self.config.algorithm.kl_penalty)
+                        if self.config.algorithm.difficulty_aware_kl_penalty:
+                            print("[Train] Using difficulty-aware KL penalty.")
+                            batch, kl_metrics = apply_difficulty_aware_kl_penalty(batch, self.kl_ctrl, self.config.algorithm.kl_penalty)
+                        else:
+                            print("[Train] Using original KL penalty.")
+                            batch, kl_metrics = apply_kl_penalty(batch, self.kl_ctrl, self.config.algorithm.kl_penalty)
                         metrics.update(kl_metrics)
                     else:
                         batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]

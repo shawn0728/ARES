@@ -135,6 +135,10 @@ class BatchFunctionRewardManager(FunctionRewardManager):
                     "target_high_entropy_token_num": data.non_tensor_batch.get("target_high_entropy_token_num", [0] * len(data))[i],
                     "target_entropy": data.non_tensor_batch.get("target_entropy", [0.2] * len(data))[i],
                     "difficulty": data.non_tensor_batch.get("difficulty", ["easy"] * len(data))[i],
+                    "alpha_entropy": data.non_tensor_batch.get("alpha_entropy", [0.5] * len(data))[i],
+                    # new fields for constrained cost
+                    "lambda_entropy": data.non_tensor_batch.get("lambda_entropy", [0.0] * len(data))[i],
+                    "reasoning_soft_cost": data.non_tensor_batch.get("reasoning_soft_cost", [0.0] * len(data))[i],
                 }
             )
 

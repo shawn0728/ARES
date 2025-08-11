@@ -113,8 +113,8 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = False) -> Dict[str
 
         for i, difficulty in enumerate(difficulty_list):
             if difficulty == target_difficulty:
-                valid = batch.non_tensor_batch.get("valid_reasoning_token_num", [0] * len(difficulty_list))[i]
-                invalid = batch.non_tensor_batch.get("invalid_reasoning_token_num", [0] * len(difficulty_list))[i]
+                valid = batch.non_tensor_batch.get("high_entropy_token_num", [0] * len(difficulty_list))[i]
+                invalid = batch.non_tensor_batch.get("invalid_reasoning_trigger_list", [0] * len(difficulty_list))[i]
                 valid_list.append(valid)
                 invalid_list.append(invalid)
 
@@ -122,6 +122,21 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = False) -> Dict[str
             reasoning_token_metrics[f"reasoning_tokens_statistics/{target_difficulty}/valid_mean"] = float(np.mean(valid_list))
             reasoning_token_metrics[f"reasoning_tokens_statistics/{target_difficulty}/invalid_mean"] = float(np.mean(invalid_list))
             reasoning_token_metrics[f"reasoning_tokens_statistics/{target_difficulty}/count"] = len(valid_list)
+
+    # === [NEW METRIC] reward accuracy per difficulty ===
+    reward_acc_metrics = defaultdict(list)
+
+    for target_difficulty in ["easy", "medium", "hard"]:
+        accuracy_list = []
+
+        for i, difficulty in enumerate(difficulty_list):
+            if difficulty == target_difficulty:
+                acc = batch.non_tensor_batch["accuracy"][i]
+                accuracy_list.append(acc)
+
+        if len(accuracy_list) >= 1:
+            reward_acc_metrics[f"reward/{target_difficulty}/accuracy"] = float(np.mean(accuracy_list))
+            reward_acc_metrics[f"reward/{target_difficulty}/count"] = len(accuracy_list)
 
     metrics = {
         # score
@@ -167,6 +182,8 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = False) -> Dict[str
     }
     metrics.update(bucketed_metrics)
     metrics.update(entropy_acc_metrics)
+    metrics.update(reasoning_token_metrics)
+    metrics.update(reward_acc_metrics)
     return metrics
 
 
