@@ -772,6 +772,11 @@ class RayPPOTrainer:
                 global_ids = test_batch.non_tensor_batch["global_id"]
                 entropies = test_batch.non_tensor_batch["entropies"]
 
+                # accumulate per uid statistics
+                for gid, acc, L in zip(global_ids, accuracies, lengths):
+                    uid2acc[gid].append(float(acc))
+                    uid2len[gid].append(int(L))
+
                 self.update_difficulty_and_skip_gid_set(test_batch)
 
             except Exception as e:
@@ -779,6 +784,51 @@ class RayPPOTrainer:
                 continue
 
         self.actor_rollout_ref_wg.release_rollout_engine()
+
+        # assign initial difficulty buckets by mean accuracy over rollouts
+        difficulty_dict_bootstrap = {}
+        bucket_acc, bucket_len, bucket_cnt = defaultdict(list), defaultdict(list), defaultdict(int)
+        for gid, acc_list in uid2acc.items():
+            acc_rate = float(np.mean(acc_list)) if len(acc_list)>0 else 0.0
+            if acc_rate >= 2/3:
+                diff = "easy"
+            elif acc_rate >= 1/3:
+                diff = "medium"
+            else:
+                diff = "hard"
+            difficulty_dict_bootstrap[gid] = diff
+            L_list = uid2len.get(gid, [])
+            if len(L_list)>0:
+                bucket_acc[diff].append(acc_rate)
+                bucket_len[diff].append(float(np.mean(L_list)))
+                bucket_cnt[diff] += 1
+
+        # persist bootstrap difficulty mapping
+        out_dir = os.path.join(self.config.trainer.load_checkpoint_path or self.config.trainer.experiment_name, "bootstrap")
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+            with open(os.path.join(out_dir, "difficulty_bootstrap.json"), "w") as f:
+                json.dump(difficulty_dict_bootstrap, f)
+        except Exception as e:
+            print(f"[Bootstrap] Failed to save difficulty mapping: {e}")
+
+        # seed training difficulty dict with bootstrap mapping
+        self.difficulty_dict_train.update(difficulty_dict_bootstrap)
+
+        # log per-bucket baseline stats
+        baseline_metrics = {}
+        # store baseline for progress tracking
+        self.bootstrap_baseline = {}
+        for diff in ("easy","medium","hard"):
+            if bucket_cnt[diff] > 0:
+                baseline_metrics[f"bootstrap/{diff}/count"] = int(bucket_cnt[diff])
+                baseline_metrics[f"bootstrap/{diff}/acc_mean"] = float(np.mean(bucket_acc[diff]))
+                baseline_metrics[f"bootstrap/{diff}/len_mean"] = float(np.mean(bucket_len[diff]))
+                self.bootstrap_baseline[diff] = {
+                    "acc_mean": float(np.mean(bucket_acc[diff])),
+                    "len_mean": float(np.mean(bucket_len[diff])),
+                }
+        self.logger.log(data=baseline_metrics, step=self.global_step)
 
         self.logger.log(
             data={
@@ -922,17 +972,7 @@ class RayPPOTrainer:
                         skip_gid_set=self.skip_gid_set
                         )
                         self.data_iterator = iter(self.train_dataloader)
-                        # import pdb;pdb.set_trace()
-                        batch = self._make_batch_data(metrics=metrics)
-                        # ✅ Log current epoch + skip gid count to wandb
-                        self.logger.log(
-                            data={
-                                "epoch/id": self.epoch_id,
-                                "epoch/skip_gid_count": len(self.skip_gid_set),
-                                "epoch/iter_num":len(self.train_dataloader) 
-                            },
-                            step=self.global_step,
-                        )
+                        continue
                     self.actor_rollout_ref_wg.release_rollout_engine()
 
                 # balance the number of valid tokens on each dp rank.
@@ -1008,6 +1048,32 @@ class RayPPOTrainer:
                 if "token_level_scores" not in batch.batch:
                     with timer("reward", timing_raw):
                         reward_ref = self.reward_fn.compute_reward.remote(batch)
+
+                # log per-bucket accuracy/length on this batch
+                try:
+                    difficulty_list = batch.non_tensor_batch.get("difficulty", None)
+                    acc_list = batch.non_tensor_batch.get("accuracy", None)
+                    if difficulty_list is not None and acc_list is not None:
+                        resp_len = batch.batch["response_mask"].sum(dim=-1).cpu().tolist()
+                        per_bucket = {"easy":[], "medium":[], "hard":[]}
+                        per_bucket_len = {"easy":[], "medium":[], "hard":[]}
+                        for d,a,L in zip(difficulty_list, acc_list, resp_len):
+                            key = str(d)
+                            if key in per_bucket:
+                                per_bucket[key].append(float(a))
+                                per_bucket_len[key].append(int(L))
+                        for k in per_bucket:
+                            if len(per_bucket[k])>0:
+                                metrics[f"train/{k}/acc_mean"] = float(np.mean(per_bucket[k]))
+                                metrics[f"train/{k}/len_mean"] = float(np.mean(per_bucket_len[k]))
+                        # log progress deltas every 5 steps based on bootstrap baseline
+                        if hasattr(self, "bootstrap_baseline") and (self.global_step % 10 == 0):
+                            for k in ("easy","medium","hard"):
+                                if (f"train/{k}/acc_mean" in metrics) and (k in self.bootstrap_baseline):
+                                    metrics[f"progress/{k}/dacc"] = metrics[f"train/{k}/acc_mean"] - self.bootstrap_baseline[k]["acc_mean"]
+                                    metrics[f"progress/{k}/dlen"] = metrics[f"train/{k}/len_mean"] - self.bootstrap_baseline[k]["len_mean"]
+                except Exception:
+                    pass
 
                 # recompute old_log_probs
                 with timer("old", timing_raw):
