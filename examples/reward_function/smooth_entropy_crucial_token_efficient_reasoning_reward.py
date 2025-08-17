@@ -110,38 +110,37 @@ def compute_score(reward_inputs: List[Dict[str, Any]], format_weight: float = 0.
         entropy_score = 0.0
 
         # If lambda and soft_cost exist, prioritize constrained formulation
-        if (reward_input.get("lambda_entropy") is not None) and (reward_input.get("reasoning_soft_cost") is not None):
-            entropy_score = - lambda_entropy * soft_cost
-        else:
-            if difficulty in ("easy", "medium"):
-                if accuracy_score == 1.0:
-                    if difficulty == "easy":
-                        over = max(delta - margin, 0.0)                     
-                        pen  = _huber_penalty(over, kappa)
-                        entropy_score = -min(cap, pen / (margin + kappa) * cap)
-                    else:  # medium
-                        dev  = max(abs(delta) - margin, 0.0)                
-                        pen  = _huber_penalty(dev, kappa)
-                        entropy_score = -min(cap, pen / (margin + kappa) * cap)
+#           if (reward_input.get("lambda_entropy") is not None) and (reward_input.get("reasoning_soft_cost") is not None):
+#             entropy_score = - lambda_entropy * soft_cost`
+#           else:
+        if difficulty in ("easy", "medium"):
+            if accuracy_score == 1.0:
+                if difficulty == "easy":
+                    over = max(delta - margin, 0.0)                     
+                    pen  = _huber_penalty(over, kappa)
+                    entropy_score = -min(cap, pen / (margin + kappa) * cap)
+                else:  # medium
+                    dev  = max(abs(delta) - margin, 0.0)                
+                    pen  = _huber_penalty(dev, kappa)
+                    entropy_score = -min(cap, pen / (margin + kappa) * cap)
+            else:
+                lack = max((target_token_num - gen_token_num) - margin, 0.0)
+                gain = _sigmoid_saturate(lack, temp) * cap * (0.6 if difficulty == "easy" else 0.8)
+                entropy_score = gain
+
+        elif difficulty == "hard":
+            if accuracy_score == 1.0:
+                if delta >= -margin:
+                    bonus = _sigmoid_saturate(delta - (-margin), temp) * cap 
+                    entropy_score = bonus
                 else:
-                    lack = max((target_token_num - gen_token_num) - margin, 0.0)
-                    gain = _sigmoid_saturate(lack, temp) * cap * (0.6 if difficulty == "easy" else 0.8)
-                    entropy_score = gain
+                    pen = _huber_penalty((-delta) - margin, kappa)
+                    entropy_score = -min(cap, 0.5 * pen / (margin + kappa) * cap)
+            else:
 
-            elif difficulty == "hard":
-                if accuracy_score == 1.0:
-
-                    if delta >= -margin:
-                        bonus = _sigmoid_saturate(delta - (-margin), temp) * cap 
-                        entropy_score = bonus
-                    else:
-                        pen = _huber_penalty((-delta) - margin, kappa)
-                        entropy_score = -min(cap, 0.5 * pen / (margin + kappa) * cap)
-                else:
-
-                    lack = max((target_token_num - gen_token_num) - margin, 0.0)
-                    gain = _sigmoid_saturate(lack, temp) * cap
-                    entropy_score = gain
+                lack = max((target_token_num - gen_token_num) - margin, 0.0)
+                gain = _sigmoid_saturate(lack, temp) * cap
+                entropy_score = gain
 
         overall_score = float(accuracy_score) + float(entropy_score)
         # overall_score += format_score * format_weight
