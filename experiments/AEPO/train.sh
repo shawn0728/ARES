@@ -3,7 +3,7 @@ set -x
 
 export PYTHONUNBUFFERED=1
 export WANDB_BASE_URL=https://api.wandb.ai
-export WANDB_API_KEY="9c62933f71d04da55b4bc9e7f61f72356dfbf071" # replace with your own wandb api key
+export WANDB_API_KEY=xxx # replace with your own wandb api key
 wandb_run_id=xxx # replace with your own wandb run id
 PROJECT_NAME=xxx # replace with your own project name
 EXPERIMENT_NAME=xxx # replace with your own experiment name
