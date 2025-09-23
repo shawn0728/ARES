@@ -176,12 +176,9 @@ if __name__ == "__main__":
     with torch.device("meta"):
         model: PreTrainedModel = AutoClass.from_config(config, torch_dtype=torch.bfloat16)
 
-    # import pdb;pdb.set_trace()
     assert isinstance(model, PreTrainedModel)
     model.to_empty(device="cpu")
 
-    # 💡 添加这一句
-    model.load_state_dict(state_dict, strict=False) 
     print(f"Saving model to {hf_path}...")
     model.save_pretrained(hf_path, state_dict=state_dict)
     del state_dict, model

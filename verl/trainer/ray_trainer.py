@@ -103,37 +103,6 @@ class ResourcePoolManager:
         if gpus_available < gpus_required:
             raise ValueError(f"Total available GPUs {gpus_available} is less than total desired GPUs {gpus_required}.")
 
-def apply_difficulty_aware_kl_penalty(data: DataProto, kl_ctrl: KLController, kl_penalty="kl"):
-    token_level_scores = data.batch["token_level_scores"]
-    batch_size = data.batch.batch_size[0]
-    response_mask = data.batch["response_mask"]
-    
-    # 获取难度信息
-    difficulty_list = data.non_tensor_batch.get("difficulty", ["medium"] * batch_size)
-    difficulty_kl_coef_dict = {
-        "easy": 2.0,    
-        "medium": 1.0,  
-        "hard": 0.5,    
-    }
-    # 计算KL divergence
-    kld = compute_kl(data.batch["old_log_probs"], data.batch["ref_log_probs"], kl_penalty=kl_penalty)
-    kld = kld * response_mask
-    
-    # 应用基于难度的KL penalty
-    token_level_rewards = token_level_scores.clone()
-    for i, difficulty in enumerate(difficulty_list):
-        kl_coef = kl_ctrl.kl_coef * difficulty_kl_coef_dict[difficulty]
-        token_level_rewards[i] = token_level_scores[i] - kl_coef * kld[i]
-    
-    data.batch["token_level_rewards"] = token_level_rewards
-    
-    # 其余逻辑保持不变...
-    current_kl = VF.masked_mean(kld, mask=response_mask, dim=-1)
-    current_kl = torch.mean(current_kl, dim=0).item()
-    metrics = {"critic/kl": current_kl, "critic/kl_coef": kl_ctrl.kl_coef}
-    
-    kl_ctrl.update(current_kl=current_kl, n_steps=batch_size)
-    return data, metrics
 
 def apply_kl_penalty(data: DataProto, kl_ctrl: KLController, kl_penalty="kl"):
     token_level_scores = data.batch["token_level_scores"]
@@ -223,7 +192,6 @@ class RayPPOTrainer:
         self.use_reward_model = Role.RewardModel in role_worker_mapping
         self.ray_worker_group_cls = ray_worker_group_cls
         self.difficulty_dict_train = {}
-        self.target_length_dict = {}
         self.target_high_entropy_token_num_dict = {}
         # Adaptive entropy shaping alpha per difficulty
         def _get_conf(name, default):
@@ -288,7 +256,6 @@ class RayPPOTrainer:
         ):
             raise ValueError("GRPO and RLOO algorithm need `config.worker.rollout.n > 1`.")
 
-        # 需要更改
         if config.trainer.max_steps is not None:
             self.training_steps = config.trainer.max_steps
         elif config.data.mini_rollout_batch_size is not None:
@@ -419,7 +386,6 @@ class RayPPOTrainer:
         actor_path = os.path.join(load_path, "actor")
         self.actor_rollout_ref_wg.load_checkpoint(actor_path)
         if self.use_critic:
-            # critic_path = os.path.join(self.config.trainer.load_checkpoint_path, "critic")
             critic_path = os.path.join(load_path, "critic")
             self.critic_wg.load_checkpoint(critic_path)
 
@@ -464,7 +430,6 @@ class RayPPOTrainer:
         reward_metrics_lst = defaultdict(list)
         uid2rollouts = defaultdict(list)
         print("Start validation...")
-        # all_token_entropy_list = []
         self.actor_rollout_ref_wg.prepare_rollout_engine()
         for batch_dict in self.val_dataloader:
             test_batch = DataProto.from_single_dict(batch_dict)
@@ -481,7 +446,6 @@ class RayPPOTrainer:
 
             test_gen_batch, pad_size = pad_dataproto_to_divisor(test_gen_batch, self.actor_rollout_ref_wg.world_size)
             test_output_gen_batch = self.actor_rollout_ref_wg.generate_sequences(test_gen_batch)
-            # test_output_gen_batch = self.actor_rollout_ref_wg.generate_sequences_with_tokenwise(test_gen_batch)
             test_output_gen_batch = unpad_dataproto(test_output_gen_batch, pad_size=pad_size * repeat_times)
 
             # repeat to align with repeated responses in rollout
@@ -495,9 +459,7 @@ class RayPPOTrainer:
             lengths = test_batch.batch["response_mask"].sum(dim=-1).cpu().tolist()
             global_ids = test_batch.non_tensor_batch["global_id"]
             entropies = test_batch.non_tensor_batch["entropies"]
-            # tokenwise_entropy_list = test_batch.non_tensor_batch["tokenwise_entropy_threshold"].tolist()
             high_entropy_token_num = test_batch.non_tensor_batch["high_entropy_token_num"]
-            # all_token_entropy_list.extend(tokenwise_entropy_list)
 
             for gid, acc, entropy,high_ety_token_num, length in zip(global_ids, accuracies,entropies,high_entropy_token_num, lengths):
                 uid2rollouts[gid].append({'length': length,'entropy':entropy, "high_ety_token_num":high_ety_token_num,'is_correct': acc > 0.5})
@@ -517,7 +479,7 @@ class RayPPOTrainer:
                 reward_metrics_lst[key].extend(value)
 
         self.actor_rollout_ref_wg.release_rollout_engine()
-        # 聚合 accuracy，判定 difficulty，如果 high_entropy_token_threshold 未设置(初始validation），则使用所有 token 的平均 entropy
+        # 
         if self.high_entropy_token_threshold < 0:
             self.high_entropy_token_threshold = np.mean(test_batch.non_tensor_batch["entropy_percentile_thresholds"])
         difficulty_dict_val = {}
@@ -535,12 +497,8 @@ class RayPPOTrainer:
             difficulty_rollouts[diff].extend(rollouts)
 
         self.difficulty_dict_val = difficulty_dict_val
-        # 使用 LASER-D 的 ECR 方式计算 target length
-        val_difficulty_statistics = {}
-        target_entropy_dict = {}
         target_high_entropy_num_dict = {}
 
-        # 统计所有 entropy
         all_high_entropy_token_num = []
         for rollouts in difficulty_rollouts.values():
             all_high_entropy_token_num.extend([r["high_ety_token_num"] for r in rollouts])
@@ -552,54 +510,18 @@ class RayPPOTrainer:
 
         for diff in ["easy", "medium", "hard"]:
             target_high_entropy_num_dict[diff] = int(min_entropy + difficulty_entropy_coef[diff] * (max_entropy - min_entropy))
-            print(f"[Debug] {diff}: {min_entropy} + {difficulty_entropy_coef[diff]} * ({max_entropy} - {min_entropy}) = {target_high_entropy_num_dict[diff]}")
 
         for diff in ["easy", "medium", "hard"]:
             rollouts = difficulty_rollouts[diff]
-            val_difficulty_statistics[diff] = len(rollouts)
-
-            if not rollouts:
-                self.target_length_dict[diff] = 64
-                continue
             
             # calculate expected_entropy
             entropies = [r["entropy"] for r in rollouts]
-            expected_entropy = np.percentile(entropies, 75)  # 例如 p75
-            target_entropy_dict[diff] = expected_entropy
-
-            min_len, max_len, interval = 96, self.config.data.max_response_length, 32
-            C_d = {"easy": 6, "medium": 3, "hard": 1}[diff]
-            found = False
-            for l in range(min_len, max_len + 1, interval):
-                # 从全局样本sample
-                all_rollout_num = len(rollouts)
-                correct = [r for r in rollouts if r["is_correct"]]
-                covered = [r for r in correct if r["length"] <= l]
-                P_ld = len(covered) / max(1, all_rollout_num)
-                ECR_d = P_ld * C_d
-                if ECR_d >= 1.0:
-                    self.target_length_dict[diff] = l
-                    found = True
-                    break
-            if not found:
-                self.target_length_dict[diff] = max_len  # fallback
         
-
-        # self.target_high_entropy_token_num_dict = target_high_entropy_num_dict
-        # drop_ratio = 0.8  # 或者 0.4, 0.3
-        # self.drop_allpass_entropy_threshold = min_entropy + drop_ratio * (self.target_high_entropy_token_num_dict['easy'] - min_entropy)
         self._maybe_log_val_generations(sample_inputs, sample_outputs, sample_labels, sample_scores)
         self.val_reward_score = torch.cat(reward_tensor_lst, dim=0).sum(-1).mean().item()
         val_reward_metrics = {f"val/{key}_reward": value for key, value in reduce_metrics(reward_metrics_lst).items()}
-        # val_reward_metrics.update(
-        #     {
-        #         "val/difficulty_statistics": val_difficulty_statistics,
-        #         "val/target_length": self.target_length_dict,
-        #     }
-        # )
         val_reward_metrics.update({"val/self.expected_high_entropy_token_num": self.target_high_entropy_token_num_dict})
         val_reward_metrics.update({"val/self.high_entropy_token_threshold": self.high_entropy_token_threshold})
-        # import pdb; pdb.set_trace()  # Debugging breakpoint
         print("Finish validation.")
         return {"val/reward_score": self.val_reward_score, **val_reward_metrics}
 
@@ -630,15 +552,11 @@ class RayPPOTrainer:
             num_try_make_batch += 1
             try:
                 batch_dict = next(self.data_iterator)
-            # except StopIteration:
-            #     self.data_iterator = iter(self.train_dataloader)
-            #     batch_dict = next(self.data_iterator)
             except StopIteration:
                 print("[_make_batch_data] Iterator exhausted.")
                 return None
             except Exception as e:
                 print(f"[_make_batch_data] Other exception: {e}")
-                import traceback; traceback.print_exc()
                 return None
             meta_info = {
                 "min_pixels": self.config.data.min_pixels,
@@ -657,7 +575,6 @@ class RayPPOTrainer:
 
             # generate a batch
             gen_batch_output = self.actor_rollout_ref_wg.generate_sequences(gen_batch)
-            # gen_batch_output = self.actor_rollout_ref_wg.generate_sequences_with_tokenwise(gen_batch)
 
             if self.config.algorithm.adv_estimator == "remax":
                 gen_baseline_batch = deepcopy(gen_batch)
@@ -676,11 +593,9 @@ class RayPPOTrainer:
             new_batch.non_tensor_batch["uid"] = np.array(
                 [str(uuid.uuid4()) for _ in range(len(new_batch.batch))], dtype=object
             )
-            # import pdb;pdb.set_trace()
             # repeat to align with repeated responses in rollout
             new_batch = new_batch.repeat(repeat_times=self.config.worker.rollout.n, interleave=True)
             new_batch = new_batch.union(gen_batch_output)
-            # import pdb;pdb.set_trace()
 
             # filter group
             if self.config.algorithm.online_filtering:
@@ -742,7 +657,7 @@ class RayPPOTrainer:
         # self.actor_rollout_ref_wg.release_rollout_engine()
         for batch_dict in tqdm(self.bootstrap_train_dataloader,desc="[Bootstrap] Processing batches"):
             try:
-                # 构造 DataProto
+                # construct DataProto
                 test_batch = DataProto.from_single_dict(batch_dict)
                 test_gen_batch = test_batch.pop(
                     batch_keys=["input_ids", "attention_mask", "position_ids"],
@@ -773,6 +688,7 @@ class RayPPOTrainer:
                 entropies = test_batch.non_tensor_batch["entropies"]
 
                 # accumulate per uid statistics
+                # inject per-sample alpha_entropy resolved from difficulty
                 for gid, acc, L in zip(global_ids, accuracies, lengths):
                     uid2acc[gid].append(float(acc))
                     uid2len[gid].append(int(L))
@@ -839,7 +755,6 @@ class RayPPOTrainer:
             step=self.global_step
         )
 
-        # print(f"[Bootstrap] difficulty_dict entries: {len(self.difficulty_dict)}")
 
     def compute_batch_accuracy(self, batch: DataProto) -> List[float]:
         responses = batch.batch["responses"]
@@ -946,13 +861,6 @@ class RayPPOTrainer:
                 },
                 step=self.global_step,
             )
-        # perform validation before training
-        # currently, we only support validation using the reward_function.
-        # if self.val_reward_fn is not None and self.config.trainer.val_before_train:
-        #     val_metrics = self._validate()
-        #     self.logger.log(data=val_metrics, step=self.global_step)
-        #     if self.config.trainer.val_only:
-        #         return
         
 
 
@@ -978,12 +886,9 @@ class RayPPOTrainer:
                 # balance the number of valid tokens on each dp rank.
                 # NOTE: this breaks the order of data inside the batch.
                 # Please take care when you implement group based adv computation such as GRPO and rloo
-                # import pdb;pdb.set_trace()
                 self._balance_batch(batch, metrics=metrics)
                 
                 batch.non_tensor_batch['accuracy'] = self.compute_batch_accuracy(batch)
-
-
                 # use training batch to determine the high_entropy_token_threshold
                 global_ids = batch.non_tensor_batch["global_id"]
                 batch_thresholds = batch.non_tensor_batch["entropy_percentile_thresholds"]
@@ -995,10 +900,8 @@ class RayPPOTrainer:
                     self._ema_entropy_threshold = 0.99 * self._ema_entropy_threshold + 0.01 * batch_p95
                 self.high_entropy_token_threshold = float(self._ema_entropy_threshold)
                 self.update_difficulty_and_skip_gid_set(batch)
-                batch.non_tensor_batch["dynamic_token_length"] = [self.target_length_dict[self.difficulty_dict_train[gid]] for gid in global_ids]
                 batch.non_tensor_batch["difficulty"] = [self.difficulty_dict_train[gid] for gid in global_ids]
                 batch.non_tensor_batch["target_high_entropy_token_num"] = [self.target_high_entropy_token_num_dict[self.difficulty_dict_train[gid]] for gid in global_ids]
-                # inject per-sample alpha_entropy resolved from difficulty
                 batch.non_tensor_batch["alpha_entropy"] = [self.alpha_entropy_dict[self.difficulty_dict_train[gid]] for gid in global_ids]
 
                 # --- Dual-ascent lambda for reasoning cost (soft) ---
@@ -1039,16 +942,12 @@ class RayPPOTrainer:
                         self.lambda_entropy_dict[diff] = new_lam
                 # inject per-sample lambda to batch
                 batch.non_tensor_batch["lambda_entropy"] = [self.lambda_entropy_dict[self.difficulty_dict_train[gid]] for gid in global_ids]
-
-
                 # compute global valid tokens
                 batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
-
                 # compute reward
                 if "token_level_scores" not in batch.batch:
                     with timer("reward", timing_raw):
                         reward_ref = self.reward_fn.compute_reward.remote(batch)
-
                 # log per-bucket accuracy/length on this batch
                 try:
                     difficulty_list = batch.non_tensor_batch.get("difficulty", None)
@@ -1103,12 +1002,7 @@ class RayPPOTrainer:
                     # apply kl penalty if available
                     if not self.config.algorithm.use_kl_loss and self.use_reference_policy:
                         # apply kl penalty to reward
-                        if self.config.algorithm.difficulty_aware_kl_penalty:
-                            print("[Train] Using difficulty-aware KL penalty.")
-                            batch, kl_metrics = apply_difficulty_aware_kl_penalty(batch, self.kl_ctrl, self.config.algorithm.kl_penalty)
-                        else:
-                            print("[Train] Using original KL penalty.")
-                            batch, kl_metrics = apply_kl_penalty(batch, self.kl_ctrl, self.config.algorithm.kl_penalty)
+                        batch, kl_metrics = apply_kl_penalty(batch, self.kl_ctrl, self.config.algorithm.kl_penalty)
                         metrics.update(kl_metrics)
                     else:
                         batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]

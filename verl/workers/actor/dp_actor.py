@@ -392,20 +392,4 @@ class DataParallelPPOActor(BasePPOActor):
 
         return metrics
 
-    def _get_difficulty_coefficient(self, difficulty_levels):
-        """根据难度级别返回系数"""
-        difficulty_coefficients = {
-            'easy': 1.25,    # 简单题 KL 惩罚更重，强制对齐 reference，少瞎编
-            'medium': 1.0,  # 中等题维持中性惩罚
-            'hard': 0.75     # 困难题 KL 惩罚更轻，鼓励发散探索
-        }
-        device = next(self.actor_module.parameters()).device
-        # 将难度级别转换为系数
-        coef_tensor = torch.tensor([
-            difficulty_coefficients.get(level, 1.0) 
-            for level in difficulty_levels
-        ], device=device)
-        
-        return coef_tensor.unsqueeze(-1)  # 扩展到token维度
-
 

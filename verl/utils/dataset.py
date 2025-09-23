@@ -137,20 +137,7 @@ class RLHFDataset(Dataset):
             self.dataset = load_dataset(file_type, data_dir=data_path, split=data_split)
         elif os.path.isfile(data_path):
             file_type = os.path.splitext(data_path)[-1][1:].replace("jsonl", "json")
-            print(f"Loading dataset from {data_path} with file type {file_type} and split {data_split}")
-            # self.dataset = load_dataset(file_type, data_files=data_path, split=data_split,cache_dir="/cpfs/user/yym/tmp/hf_cache")
             self.dataset = load_dataset(file_type, data_files=data_path, split=data_split)
-            # if file_type == "parquet":
-            #     # features = Features({
-            #     #     "images": Sequence(HFImage()),
-            #     #     "problem": Value("string"),
-            #     #     "answer": Value("string"),
-            #     #     "global_id": Value("string"),
-            #     # })
-            #     # self.dataset = load_dataset(file_type, data_files=data_path, split=data_split, features=features)
-            #     self.dataset = load_dataset(file_type, data_files=data_path, split=data_split)
-            # else:
-            #     self.dataset = load_dataset(file_type, data_files=data_path, split=data_split)
         else:
             # load remote dataset from huggingface hub
             self.dataset = load_dataset(data_path, split=data_split)

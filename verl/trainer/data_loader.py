@@ -204,10 +204,5 @@ def create_filtered_train_dataloader(
         # drop_last=True,
         drop_last=True
     )
-    print(f"[Debug] train batch size is:",train_batch_size)
-    print(f"[Debug] Skip GIDs: {len(skip_gid_set)}")
-    print(f"[Debug] Raw dataset size: {len(base_dataset)}")
-    print(f"[Debug] Filtered dataset size: {len(filtered_dataset)}")
-    print(f"[Debug] Train dataloader len (i.e., #batches): {len(train_dataloader)}")
     return train_dataloader
 
