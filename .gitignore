@@ -9,8 +9,8 @@ __pycache__/
 # Distribution / packaging
 .Python
 build/
-# *.json
-# *.jsonl
+*.json
+*.jsonl
 develop-eggs/
 dist/
 downloads/
