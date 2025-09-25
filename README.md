@@ -58,22 +58,6 @@ A: Single-token entropy is noisy (punctuation/formula artifacts). HWE captures *
 **Q: How does dynamic KL help?**  
 A: It serves as a token-wise “thinking budget,” relaxing at validated HWE windows while keeping regularization tight elsewhere—improving both stability and accuracy.
 
----
-
-## 📜 Citation
-```bibtex
-@article{ARES_2026,
-  title   = {ARES: Multimodal Adaptive Reasoning via Difficulty-Aware Token-Level Entropy Shaping},
-  author  = {Anonymous},
-  journal = {Under review at ICLR},
-  year    = {2026}
-}
-```
-
----
-
-## 📎 License
-Apache-2.0 (unless otherwise noted in subdirectories).
 
 ---
 
