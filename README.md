@@ -88,6 +88,40 @@ python scripts/model_merger.py \
   --local_dir ./checkpoints/${ProjectName}/exp_name/global_step_1/actor
 ```
 
+## 🖥️ Inference
+
+Run the command below.
+```bash
+MODEL_PATH="ARES"
+MAX_TOKENS=16384
+DO_SAMPLE=True
+TEMPERATURE=1.0
+TOP_P=0.95
+TOP_K=50
+NUM_RETURN_SEQUENCES=1
+
+
+prompt = "You FIRST think about the reasoning process as an internal monologue and then provide the final answer. The reasoning process MUST BE enclosed within <think> </think> tags. The final answer MUST BE put in \\boxed{}."
+question="xxx"
+
+
+python infer.py \
+ --model_path ${MODEL_PATH} \
+ --image_path ${IMAGE_PATH} \
+ --question ${question} \
+ --prompt ${prompt} \
+ --max_tokens ${MAX_TOKENS} \
+ --do_sample ${DO_SAMPLE} \
+ --temperature ${TEMPERATURE} \
+ --top_p ${TOP_P} \
+ --top_k ${TOP_K} \
+ --num_return_sequences ${NUM_RETURN_SEQUENCES} 
+```
+You can also modify the arguments in `inference/inference.sh`
+```shell
+bash inference/inference.sh
+```
+
 ---
 
 ## 📊 Highlights
