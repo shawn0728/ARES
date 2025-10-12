@@ -18,29 +18,25 @@
 
 </div>
 
-## Abstract
-Recent advances in multimodal large reasoning models (MLRMs) have substantially
-improved their ability to solve complex textual and visual tasks. However, these
-models tend to *overthink* on
-simple problems, producing unnecessarily lengthy reasoning traces, while
-*under-exploring* on challenging ones, leading to missed solutions. To 
-address this imbalance, we propose **ARES**, a unified open-source framework
-for *adaptive reasoning* that dynamically allocates exploration effort based
-on task difficulty. Our approach is motivated by two key empirical findings:
-(i) while single-token entropy is noisy, *high window-entropy (HWE)
-tokens* (token-level entropies averaged under a sliding window) can reliably capture reasoning-critical moments; and (ii) reducing HWE usage
-benefits easy problems, while increasing it is essential for solving hard ones.
-Building on these insights, ARES introduces a two-stage training pipeline. In the
-*Adaptive Cold-Start* stage, we curate multimodal and textual data paired
-with reasoning traces of length proportional to problem difficulty, equipping the
-model with initial difficulty awareness. In the second stage, we develop
-*Adaptive Entropy Policy Optimization (AEPO)*, which uses HWE tokens as
-exploration triggers to decide *when to explore*, and a hierarchical entropy
-reward with dynamic KL control to decide *how much to explore*. Extensive
-experiments demonstrate that ARES achieves superior performance and
-reasoning efficiency across diverse mathematical, logical, and multimodal
-benchmarks, while closing the gap to leading commercial systems under
-significantly lower inference costs. 
+
+## 📖 Introduction
+
+This paper proposes **ARES**, a novel open-source framework for **adaptive multimodal reasoning**, aiming to dynamically allocate the model’s reasoning effort based on the **difficulty** of the input problem.
+The authors observe a key imbalance in existing multimodal reasoning models: on **easy** tasks they tend to overthink (producing redundantly long inference traces), whereas on **hard** tasks they under-explore (missing solutions due to insufficient search). To correct this, ARES introduces a mechanism based on **High Window-Entropy (HWE)** tokens (i.e. token-level entropies averaged over a sliding window) to detect moments of reasoning uncertainty, and flexibly adapt the exploration intensity.
+
+ARES is trained with a **two-stage pipeline**:
+
+1. **Adaptive Cold-Start Stage**: construct multimodal and textual reasoning examples with trace lengths scaled to task difficulty, so the model learns a notion of difficulty awareness.
+
+2. **Adaptive Entropy Policy Optimization (AEPO)**: use HWE tokens as triggers to decide *when* to explore further, combined with a **hierarchical entropy reward** and **dynamic KL control** to decide *how much* to explore.
+
+Empirical results show that ARES achieves better tradeoffs between reasoning **efficiency** and **accuracy**, outperforming baselines across multimodal, mathematical, and logical benchmarks — while incurring lower inference costs, and narrowing the gap to commercial systems.ARES
+
+This work highlights that adaptively modulating the exploration behavior at token-level (rather than a fixed strategy) is essential for balancing reasoning depth and computational cost under varying task difficulties.
+
+## Results
+
+![Results_performance](assets/ares_performance.png)
 
 
 ![Flow chart](assets/final_flowchart_fixed.png)
