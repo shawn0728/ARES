@@ -1,10 +1,46 @@
-# ARES: Adaptive Reasoning via Entropy Shaping
+<div align="center">
+
+
+
+  <h1 style="margin: 0; font-size: 1.8em;">
+    <img src="./figures/logo.png" alt="Revisual Icon" width="50" style="vertical-align: middle; margin-right: 10px;">
+    ARES: Multimodal Adaptive Reasoning via Difficulty-Aware Token-Level Entropy Shaping
+  </h1>
+
+  [![Paper](https://img.shields.io/badge/paper-A42C25?style=for-the-badge&logo=arxiv&logoColor=white)](https://arxiv.org/abs/2510.08457)
+  [![alphaXiv](https://img.shields.io/badge/discussion-A42C25?style=for-the-badge&logo=arxiv&logoColor=white&color=blue)](https://www.alphaxiv.org/abs/2510.08457)
+  [![Github](https://img.shields.io/badge/ARES-000000?style=for-the-badge&logo=github&logoColor=000&logoColor=white)](https://github.com/shawn0728/ARES)
+  [![Hugging Face Collection](https://img.shields.io/badge/ARES_Collection-fcd022?style=for-the-badge&logo=huggingface&logoColor=000)](https://huggingface.co/collections/ares0728/ares-68e7c7160dcb48734dee4e95)
+
+  [![Awesome](https://awesome.re/badge.svg)](https://github.com/shawn0728/ARES)
+  [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
+  ![](https://img.shields.io/github/last-commit/shawn0728/ARES?color=green) 
+
+</div>
 
 ## Abstract
-Recent advances in multimodal large reasoning models (MLRMs) have improved performance on complex textual and visual tasks, yet models still **overthink** on easy problems (producing long, redundant traces) while **under-exploring** on hard ones. **ARES** is a unified framework for **difficulty-aware adaptive reasoning**:
-- **Adaptive Cold-Start (AdaCS).** Curates multimodal & textual data with reasoning lengths proportional to difficulty to instill explicit difficulty awareness.
-- **Adaptive-Entropy Policy Optimization (AEPO).** Uses **high-window-entropy (HWE)** tokens as reliable triggers for *when* to branch exploration, and a hierarchical entropy reward with **dynamic KL** as the *how much* thinking budget.
-- **Effectiveness & Efficiency.** ARES improves accuracy and reduces unnecessary tokens across MathVerse, MathVision, MathVista, DynaMath, LogicVista, MMMU and text-only benchmarks, with strong gains at both 3B and 7B scales.
+Recent advances in multimodal large reasoning models (MLRMs) have substantially
+improved their ability to solve complex textual and visual tasks. However, these
+models tend to *overthink* on
+simple problems, producing unnecessarily lengthy reasoning traces, while
+*under-exploring* on challenging ones, leading to missed solutions. To 
+address this imbalance, we propose **ARES**, a unified open-source framework
+for *adaptive reasoning* that dynamically allocates exploration effort based
+on task difficulty. Our approach is motivated by two key empirical findings:
+(i) while single-token entropy is noisy, *high window-entropy (HWE)
+tokens* (token-level entropies averaged under a sliding window) can reliably capture reasoning-critical moments; and (ii) reducing HWE usage
+benefits easy problems, while increasing it is essential for solving hard ones.
+Building on these insights, ARES introduces a two-stage training pipeline. In the
+*Adaptive Cold-Start* stage, we curate multimodal and textual data paired
+with reasoning traces of length proportional to problem difficulty, equipping the
+model with initial difficulty awareness. In the second stage, we develop
+*Adaptive Entropy Policy Optimization (AEPO)*, which uses HWE tokens as
+exploration triggers to decide *when to explore*, and a hierarchical entropy
+reward with dynamic KL control to decide *how much to explore*. Extensive
+experiments demonstrate that ARES achieves superior performance and
+reasoning efficiency across diverse mathematical, logical, and multimodal
+benchmarks, while closing the gap to leading commercial systems under
+significantly lower inference costs. 
 
 
 ![Flow chart](assets/final_flowchart_fixed.png)
