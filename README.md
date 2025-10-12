@@ -177,7 +177,7 @@ We thank the open-source community for tools, datasets, and prior work on reason
 
 We are preparing to complete these tasks over the next few weeks, please stay tuned!
 
-- 🚧 We are in the process of training for 3B Revisual-R1 and will release them in a few days.
+- 🚧 We are in the process of training for 3B ARES (Coldstart&RL) and will release them in a few days.
 - 🚧 We are also in the process of developing and open-sourcing a multimodal model with performance comparable to leading commercial systems. Stay tuned!
 
 ## 📮 Contact
