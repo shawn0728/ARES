@@ -38,9 +38,25 @@ This work highlights that adaptively modulating the exploration behavior at toke
 
 ![Results_performance](assets/ares_performance.png)
 
+Extensive experiments demonstrate that **ARES** achieves superior performance and reasoning efficiency across diverse mathematical, logical,and multimodal benchmarks, while closing the gap to leading commercial systems under significantly lower inference costs.
+
+![Bar](assets/selected_benchmarks_avg.png)
+
+---
+
+## Pipeline
+
+Overall training pipeline of our method **ARES**. 
+Stage 1 (Adaptive Coldstart Fine-Tuning):
+difficulty-aware selective data curation and adaptive KL-guided fine-tuning establish a strong initialization across text and multimodal inputs. Stage 2 (Adaptive Entropy Policy Optimization, AEPO):
+online difficulty bucketing and entropy-aware rollout allocate reasoning depth dynamically, with
+high-entropy windows serving as branching points for exploration. Together, the two stages enable
+uncertainty-aware, difficulty-adaptive reasoning for large language models.
 
 ![Flow chart](assets/final_flowchart_fixed.png)
+
 ---
+
 
 ## 🛠️ Installation
 ```bash
@@ -79,19 +95,40 @@ python scripts/model_merger.py \
 - **ARES-7B:** +9.7 average over strong 7B open baselines; large gains on MathVision and DynaMath-W.
 - **Efficiency:** Shorter responses on easy/medium tasks; deeper but targeted exploration on hard tasks.
 
-(See paper tables/figures for complete numbers and ablations on entropy reward vs. dynamic KL.)
+![ARES_RL_Performance](assets/ares_rl_performance.png)
 
----
-
-## 🔍 FAQ
-**Q: Why window entropy (HWE) rather than single-token entropy?**  
-A: Single-token entropy is noisy (punctuation/formula artifacts). HWE captures *sustained* uncertainty—better aligned with genuine reasoning bifurcations—so we branch only where it matters.
-
-**Q: How does dynamic KL help?**  
-A: It serves as a token-wise “thinking budget,” relaxing at validated HWE windows while keeping regularization tight elsewhere—improving both stability and accuracy.
 
 
 ---
 
 ## 🙌 Acknowledgements
 We thank the open-source community for tools, datasets, and prior work on reasoning-oriented pretraining and RL that inspired this project.
+
+
+## 🚧 TODO
+
+We are preparing to complete these tasks over the next few weeks, please stay tuned!
+
+- 🚧 We are in the process of training for 3B Revisual-R1 and will release them in a few days.
+- 🚧 We are also in the process of developing and open-sourcing a multimodal model with performance comparable to leading commercial systems. Stay tuned!
+
+## 📮 Contact
+
+For questions, feedback, or collaboration opportunities, feel free to reach out: csfufu0728@gmail.com
+
+
+## 📄Citation
+
+If you find our works useful for your research, please consider citing:
+```
+@misc{chen2025aresmultimodaladaptivereasoning,
+      title={ARES: Multimodal Adaptive Reasoning via Difficulty-Aware Token-Level Entropy Shaping}, 
+      author={Shuang Chen and Yue Guo and Yimeng Ye and Shijue Huang and Wenbo Hu and Haoxi Li and Manyuan Zhang and Jiayu Chen and Song Guo and Nanyun Peng},
+      year={2025},
+      eprint={2510.08457},
+      archivePrefix={arXiv},
+      primaryClass={cs.CL},
+      url={https://arxiv.org/abs/2510.08457}, 
+}
+```
+
