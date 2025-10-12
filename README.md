@@ -61,8 +61,8 @@ uncertainty-aware, difficulty-adaptive reasoning for large language models.
 
 | **Model**                          | **Huggingface** |  **Base Model** |
 |-----------------------------------|------------------|------------------|
-| ARES-Coldstart | https://huggingface.co/csfufu/Revisual-R1-Coldstart |  Qwen2.5-VL-7B-Instruct |
-| ARES-final | https://huggingface.co/csfufu/Revisual-R1-final | Qwen2.5-VL-7B-Instruct |
+| ARES-Coldstart | https://huggingface.co/datasets/ares0728/ARES-Adaptive-Coldstart |  Qwen2.5-VL-7B-Instruct |
+| ARES-RL | https://huggingface.co/ares0728/ARES-RL-7B | Qwen2.5-VL-7B-Instruct |
 
 
 ## 🔮 Datasets
@@ -71,7 +71,7 @@ uncertainty-aware, difficulty-adaptive reasoning for large language models.
 <img src="assets/datasets_table.png" alt="ARES results" >
 
 
-The dataset construction of **ARES** revolves around a core concept: <br> <center>"The reasoning length of the model should match the difficulty of the task."
+The dataset construction of **ARES** revolves around a core concept: <br> <center>**"The reasoning length of the model should match the difficulty of the task."**
 
 To this end, ARES does not directly use the common hybrid multimodal corpus. Instead, it constructs a difficult-aware reasoning corpus, which is specifically used to teach the model to distinguish between "easy questions" and "difficult questions" and to use different reasoning lengths and exploration intensities during the cold start stage.
 
@@ -81,7 +81,14 @@ To this end, ARES does not directly use the common hybrid multimodal corpus. Ins
 | ARES-hard-validation | https://huggingface.co/datasets/ares0728/ARES-hard-validation | 2.46K |
 | ARES-Adaptive-SFT | https://huggingface.co/datasets/ares0728/ARES-Adaptive-Coldstart | 223k |
 
+The training corpus of **ARES-Adaptive-223K** comprises two components:
 
+* **Textual reasoning data** — drawn from high-quality, reasoning-intensive datasets used to develop symbolic reasoning and reflection capabilities.
+* **Multimodal reasoning data** — collected from visual mathematics, logical reasoning, and chart-understanding datasets to enhance cross-modal reasoning consistency.
+
+To ensure coherence across sources, all reasoning traces undergo **chain-of-thought (CoT) normalization**, standardizing them into a unified “think → derive → conclude” format.
+
+> We further use **Gemini 2.5-Pro** with a *pass@3* evaluation to filter out samples that the model fails on in all three attempts across various visual benchmarks, resulting in a curated **hard-validation set** containing **2.46 k** challenging examples.
 
 ---
 
