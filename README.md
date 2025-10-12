@@ -3,7 +3,7 @@
 
 
   <h1 style="margin: 0; font-size: 1.8em;">
-    <img src="./figures/logo.png" alt="Revisual Icon" width="50" style="vertical-align: middle; margin-right: 10px;">
+    <img src="./assets/logo.png" alt="Revisual Icon" width="50" style="vertical-align: middle; margin-right: 10px;">
     ARES: Multimodal Adaptive Reasoning via Difficulty-Aware Token-Level Entropy Shaping
   </h1>
 
