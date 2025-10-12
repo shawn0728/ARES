@@ -34,7 +34,7 @@ Empirical results show that ARES achieves better tradeoffs between reasoning **e
 
 This work highlights that adaptively modulating the exploration behavior at token-level (rather than a fixed strategy) is essential for balancing reasoning depth and computational cost under varying task difficulties.
 
-## Results
+## 🧮 Results
 
 ![Results_performance](assets/ares_performance.png)
 
@@ -44,7 +44,7 @@ Extensive experiments demonstrate that **ARES** achieves superior performance an
 
 ---
 
-## Pipeline
+## 🍭 Pipeline
 
 Overall training pipeline of our method **ARES**. 
 Stage 1 (Adaptive Coldstart Fine-Tuning):
@@ -57,6 +57,33 @@ uncertainty-aware, difficulty-adaptive reasoning for large language models.
 
 ---
 
+## ✨ Models
+
+| **Model**                          | **Huggingface** |  **Base Model** |
+|-----------------------------------|------------------|------------------|
+| ARES-Coldstart | https://huggingface.co/csfufu/Revisual-R1-Coldstart |  Qwen2.5-VL-7B-Instruct |
+| ARES-final | https://huggingface.co/csfufu/Revisual-R1-final | Qwen2.5-VL-7B-Instruct |
+
+
+## 🔮 Datasets
+
+
+<img src="assets/datasets_table.png" alt="ARES results" >
+
+
+The dataset construction of **ARES** revolves around a core concept: <br> <center>"The reasoning length of the model should match the difficulty of the task."
+
+To this end, ARES does not directly use the common hybrid multimodal corpus. Instead, it constructs a difficult-aware reasoning corpus, which is specifically used to teach the model to distinguish between "easy questions" and "difficult questions" and to use different reasoning lengths and exploration intensities during the cold start stage.
+
+
+| **Datasets**                          | **Huggingface** |  **Size of the data volume** |
+|-----------------------------------|------------------|------------------|
+| ARES-hard-validation | https://huggingface.co/datasets/ares0728/ARES-hard-validation | 2.46K |
+| ARES-Adaptive-SFT | https://huggingface.co/datasets/ares0728/ARES-Adaptive-Coldstart | 223k |
+
+
+
+---
 
 ## 🛠️ Installation
 ```bash
