@@ -189,14 +189,11 @@ For questions, feedback, or collaboration opportunities, feel free to reach out:
 
 If you find our works useful for your research, please consider citing:
 ```
-@misc{chen2025aresmultimodaladaptivereasoning,
-      title={ARES: Multimodal Adaptive Reasoning via Difficulty-Aware Token-Level Entropy Shaping}, 
-      author={Shuang Chen and Yue Guo and Yimeng Ye and Shijue Huang and Wenbo Hu and Haoxi Li and Manyuan Zhang and Jiayu Chen and Song Guo and Nanyun Peng},
-      year={2025},
-      eprint={2510.08457},
-      archivePrefix={arXiv},
-      primaryClass={cs.CL},
-      url={https://arxiv.org/abs/2510.08457}, 
+@article{chen2025ares,
+  title={ARES: Multimodal Adaptive Reasoning via Difficulty-Aware Token-Level Entropy Shaping},
+  author={Chen, Shuang and Guo, Yue and Ye, Yimeng and Huang, Shijue and Hu, Wenbo and Li, Haoxi and Zhang, Manyuan and Chen, Jiayu and Guo, Song and Peng, Nanyun},
+  journal={arXiv preprint arXiv:2510.08457},
+  year={2025}
 }
 ```
 
