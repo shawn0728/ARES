@@ -195,5 +195,13 @@ If you find our works useful for your research, please consider citing:
   journal={arXiv preprint arXiv:2510.08457},
   year={2025}
 }
+
+@article{chen2025advancing,
+  title={Advancing Multimodal Reasoning: From Optimized Cold Start to Staged Reinforcement Learning},
+  author={Chen, Shuang and Guo, Yue and Su, Zhaochen and Li, Yafu and Wu, Yulun and Chen, Jiacheng and Chen, Jiayu and Wang, Weijie and Qu, Xiaoye and Cheng, Yu},
+  journal={arXiv preprint arXiv:2506.04207},
+  year={2025}
+}
+
 ```
 
