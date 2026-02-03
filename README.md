@@ -7,7 +7,7 @@
     ARES: Multimodal Adaptive Reasoning via Difficulty-Aware Token-Level Entropy Shaping
   </h1>
 
-  <center> ICLR 2026 </center>
+  <center> ICLR 2026 </center><hr>
 
   
 
